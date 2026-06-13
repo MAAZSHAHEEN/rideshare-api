@@ -5,7 +5,7 @@ A production-ready ride-sharing backend for intercity commuters in Khyber Pakhtu
 Built with FastAPI, PostgreSQL, and deployed on AWS.
 
 ## Live API
-http://3.147.63.125/docs
+https://rideshare-api.fastapicloud.dev/docs
 
 ## Tech Stack
 - FastAPI
