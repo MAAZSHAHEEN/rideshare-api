@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
+from typing import Literal
 from models import UserRole, RideStatus, BookingStatus
 
 
@@ -9,7 +10,7 @@ class UserCreate(BaseModel):
     password:     str
     cnic:         str
     phone_number: str
-    role:         UserRole = UserRole.passenger
+    role:         Literal[UserRole.passenger, UserRole.driver] = UserRole.passenger
 
 
 class UserResponse(BaseModel):
