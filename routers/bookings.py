@@ -4,8 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models import Booking, BookingStatus, Ride, RideStatus, User, UserRole
-from schemas import BookingResponse
 from routers.dependencies import get_current_user
+from schemas import BookingResponse
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
@@ -14,14 +14,15 @@ router = APIRouter(prefix="/bookings", tags=["Bookings"])
 async def book_ride(
     ride_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     # Only passengers can book
     if current_user.role != UserRole.passenger:
         raise HTTPException(status_code=403, detail="Only passengers can book rides")
 
-    # Check ride exists and is active
-    result = await db.execute(select(Ride).where(Ride.id == ride_id))
+    # Lock the ride row for the duration of this transaction to prevent
+    # concurrent requests from double-booking the last seat.
+    result = await db.execute(select(Ride).where(Ride.id == ride_id).with_for_update())
     ride = result.scalar_one_or_none()
 
     if not ride:
@@ -37,7 +38,7 @@ async def book_ride(
             Booking.ride_id == ride_id,
             Booking.passenger_id == current_user.id,
             Booking.status != BookingStatus.rejected,
-            Booking.status != BookingStatus.cancelled
+            Booking.status != BookingStatus.cancelled,
         )
     )
     if result.scalar_one_or_none():
@@ -58,11 +59,13 @@ async def respond_to_booking(
     booking_id: int,
     accept: bool,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     # Only drivers can respond
     if current_user.role != UserRole.driver:
-        raise HTTPException(status_code=403, detail="Only drivers can respond to bookings")
+        raise HTTPException(
+            status_code=403, detail="Only drivers can respond to bookings"
+        )
 
     result = await db.execute(select(Booking).where(Booking.id == booking_id))
     booking = result.scalar_one_or_none()
@@ -70,8 +73,11 @@ async def respond_to_booking(
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    # Make sure this booking belongs to driver's ride
-    result = await db.execute(select(Ride).where(Ride.id == booking.ride_id))
+    # Lock the ride row before decrementing seats to prevent concurrent accepts
+    # from producing a negative seat count.
+    result = await db.execute(
+        select(Ride).where(Ride.id == booking.ride_id).with_for_update()
+    )
     ride = result.scalar_one_or_none()
 
     if ride.driver_id != current_user.id:
@@ -81,6 +87,8 @@ async def respond_to_booking(
         raise HTTPException(status_code=400, detail="Booking already responded to")
 
     if accept:
+        if ride.available_seats < 1:
+            raise HTTPException(status_code=400, detail="No seats available")
         booking.status = BookingStatus.accepted
         ride.available_seats -= 1
     else:

@@ -1,19 +1,19 @@
 from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
 from sqlalchemy import select
-from jose import jwt, JWTError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import ALGORITHM, SECRET_KEY
 from database import get_db
 from models import User
-from routers.auth import SECRET_KEY, ALGORITHM
 
 security = HTTPBearer()
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ) -> User:
     token = credentials.credentials
     try:
