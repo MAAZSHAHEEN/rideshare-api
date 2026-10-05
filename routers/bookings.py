@@ -67,28 +67,48 @@ async def respond_to_booking(
             status_code=403, detail="Only drivers can respond to bookings"
         )
 
-    result = await db.execute(select(Booking).where(Booking.id == booking_id))
-    booking = result.scalar_one_or_none()
+    # Read only the routing key, not booking state, before acquiring locks.
+    ride_id = await db.scalar(select(Booking.ride_id).where(Booking.id == booking_id))
 
-    if not booking:
+    if ride_id is None:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    # Lock the ride row before decrementing seats to prevent concurrent accepts
-    # from producing a negative seat count.
+    # Always lock Ride -> Booking. Refresh any instances already in the session
+    # so decisions use database state after waiting for concurrent transactions.
     result = await db.execute(
-        select(Ride).where(Ride.id == booking.ride_id).with_for_update()
+        select(Ride)
+        .where(Ride.id == ride_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     ride = result.scalar_one_or_none()
+
+    if ride is None:
+        raise HTTPException(status_code=404, detail="Ride not found")
 
     if ride.driver_id != current_user.id:
         raise HTTPException(status_code=403, detail="This is not your ride")
 
+    result = await db.execute(
+        select(Booking)
+        .where(Booking.id == booking_id, Booking.ride_id == ride_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    booking = result.scalar_one_or_none()
+
+    if booking is None:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
     if booking.status != BookingStatus.pending:
-        raise HTTPException(status_code=400, detail="Booking already responded to")
+        raise HTTPException(status_code=409, detail="Booking already responded to")
+
+    if ride.status != RideStatus.active:
+        raise HTTPException(status_code=409, detail="Ride is not active")
 
     if accept:
         if ride.available_seats < 1:
-            raise HTTPException(status_code=400, detail="No seats available")
+            raise HTTPException(status_code=409, detail="No seats available")
         booking.status = BookingStatus.accepted
         ride.available_seats -= 1
     else:
