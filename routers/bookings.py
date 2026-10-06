@@ -11,6 +11,55 @@ from schemas import BookingResponse
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
 
+@router.patch("/{booking_id}/cancel", response_model=BookingResponse)
+async def cancel_booking(
+    booking_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != UserRole.passenger:
+        raise HTTPException(status_code=403, detail="Only passengers can cancel bookings")
+
+    try:
+        # Read only the routing key before locking, never lifecycle state.
+        ride_id = await db.scalar(select(Booking.ride_id).where(Booking.id == booking_id))
+        if ride_id is None:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        # Match driver responses: Ride -> Booking, refreshing identity-map state
+        # after each lock wait. Both changes belong to this session's transaction.
+        ride = await db.scalar(
+            select(Ride).where(Ride.id == ride_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if ride is None:
+            raise HTTPException(status_code=404, detail="Ride not found")
+
+        booking = await db.scalar(
+            select(Booking)
+            .where(Booking.id == booking_id, Booking.ride_id == ride_id)
+            .with_for_update().execution_options(populate_existing=True)
+        )
+        if booking is None:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        if booking.passenger_id != current_user.id:
+            raise HTTPException(status_code=403, detail="This is not your booking")
+        if booking.status not in (BookingStatus.pending, BookingStatus.accepted):
+            raise HTTPException(status_code=409, detail="Booking cannot be cancelled")
+
+        if booking.status == BookingStatus.accepted:
+            ride.available_seats += 1
+        booking.status = BookingStatus.cancelled
+        await db.commit()
+    except Exception:
+        # Rollback also expires ORM state; failed writes must not look persisted.
+        await db.rollback()
+        raise
+
+    await db.refresh(booking)
+    return booking
+
+
 @router.post("/{ride_id}", response_model=BookingResponse, status_code=201)
 async def book_ride(
     ride_id: int,

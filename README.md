@@ -68,6 +68,20 @@ can block writes while it runs; schedule it appropriately for populated database
 - POST /bookings/{ride_id} — book a ride (passenger only)
 - PATCH /bookings/{booking_id}/respond — accept or reject booking (driver only)
 
+`PATCH /bookings/{booking_id}/cancel` lets only the owning passenger cancel a
+pending or accepted booking. It returns the existing booking JSON with status
+`cancelled` (200). A pending cancellation does not change seats; an accepted
+cancellation restores exactly one seat in the same transaction. Rejected or
+already-cancelled bookings return 409, another passenger or a non-passenger role
+receives 403, and a missing booking returns 404.
+
+Cancellation and driver decisions serialize using PostgreSQL row locks in
+Ride -> Booking order. If acceptance wins first, acceptance and cancellation
+may both succeed with no net seat change. Cancelled history remains stored and
+does not prevent a new booking under the existing active-booking unique index.
+This endpoint adds no departure cutoff or ride-status restriction; those policies
+belong to later ride lifecycle work.
+
 ## Local Setup
 
 1. Clone the repo
