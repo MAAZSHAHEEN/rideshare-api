@@ -6,7 +6,21 @@ load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+try:
+    ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+except ValueError:
+    raise RuntimeError("ACCESS_TOKEN_EXPIRE_MINUTES must be a positive integer") from None
 
-if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY environment variable is not set")
+# Shared-secret HMAC signing: algorithms are chosen by configuration, not tokens.
+_MIN_KEY_BYTES = {"HS256": 32, "HS384": 48, "HS512": 64}
+if ALGORITHM not in _MIN_KEY_BYTES:
+    raise RuntimeError("ALGORITHM must be HS256, HS384, or HS512")
+if (
+    not SECRET_KEY
+    or not SECRET_KEY.strip()
+    or len(SECRET_KEY.encode("utf-8")) < _MIN_KEY_BYTES[ALGORITHM]
+    or SECRET_KEY.strip().lower().startswith(("your-secret", "yoursecret", "replace-with", "change-me", "changeme"))
+):
+    raise RuntimeError("SECRET_KEY must be a non-placeholder signing key of sufficient length for ALGORITHM")
+if ACCESS_TOKEN_EXPIRE_MINUTES <= 0:
+    raise RuntimeError("ACCESS_TOKEN_EXPIRE_MINUTES must be a positive integer")
