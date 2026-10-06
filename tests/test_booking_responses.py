@@ -16,6 +16,7 @@ from uuid import uuid4
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -273,6 +274,123 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "simulated commit failure"):
                 await self.respond(self.booking_ids[0], True)
         self.assertEqual(await self.state(), before)
+
+    async def test_active_booking_precheck_returns_conflict(self):
+        token = create_access_token(self.passenger.id, self.passenger.role)
+        for status in (BookingStatus.pending, BookingStatus.accepted):
+            with self.subTest(status=status):
+                async with self.engine.begin() as connection:
+                    await connection.execute(update(Booking).where(
+                        Booking.id == self.booking_ids[0]
+                    ).values(status=status))
+                before = await self.state()
+                response = await self.client.post(
+                    f"/bookings/{self.ride_id}", headers={"Authorization": f"Bearer {token}"},
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(await self.state(), before)
+
+    async def test_historical_booking_allows_a_new_request(self):
+        token = create_access_token(self.passenger.id, self.passenger.role)
+        for status in (BookingStatus.rejected, BookingStatus.cancelled):
+            with self.subTest(status=status):
+                # Preserve history and retire the previous iteration's pending request.
+                async with self.engine.begin() as connection:
+                    await connection.execute(update(Booking).where(
+                        Booking.passenger_id == self.passenger.id
+                    ).values(status=status))
+                response = await self.client.post(
+                    f"/bookings/{self.ride_id}", headers={"Authorization": f"Bearer {token}"},
+                )
+                self.assertEqual(response.status_code, 201, response.text)
+                self.assertEqual(response.json()["status"], "pending")
+
+    async def test_competing_writer_uniqueness_violation_returns_conflict_and_rolls_back(self):
+        # An external status update can bypass the route's ride-lock protocol.
+        # Reactivate a historical row after the precheck but before API insertion.
+        async with self.engine.begin() as connection:
+            await connection.execute(update(Booking).where(
+                Booking.id == self.booking_ids[0]
+            ).values(status=BookingStatus.rejected))
+        original_commit = AsyncSession.commit
+        original_rollback = AsyncSession.rollback
+        rollbacks = []
+
+        async def competing_commit(session):
+            with session.no_autoflush:
+                api_pid = await session.scalar(select(func.pg_backend_pid()))
+            async with self.engine.begin() as writer:
+                writer_pid = await writer.scalar(select(func.pg_backend_pid()))
+                self.assertNotEqual(api_pid, writer_pid)
+                await writer.execute(update(Booking).where(
+                    Booking.id == self.booking_ids[0]
+                ).values(status=BookingStatus.pending))
+            await original_commit(session)
+
+        async def record_rollback(session):
+            await original_rollback(session)
+            rollbacks.append(session)
+
+        token = create_access_token(self.passenger.id, self.passenger.role)
+        with patch.object(AsyncSession, "commit", competing_commit):
+            with patch.object(AsyncSession, "rollback", record_rollback):
+                response = await self.client.post(
+                    f"/bookings/{self.ride_id}", headers={"Authorization": f"Bearer {token}"},
+                )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json(), {"detail": "You already booked this ride"})
+        self.assertEqual(len(rollbacks), 1)
+        self.assertEqual(await self.state(), (2, [BookingStatus.pending, BookingStatus.pending]))
+
+    async def test_unrelated_integrity_error_is_not_mislabeled_as_duplicate(self):
+        async with self.engine.begin() as connection:
+            await connection.execute(update(Booking).where(
+                Booking.id == self.booking_ids[0]
+            ).values(status=BookingStatus.rejected))
+        before = await self.state()
+
+        async def invalid_commit(session):
+            await session.flush()
+            await session.execute(update(Ride).where(
+                Ride.id == self.ride_id
+            ).values(available_seats=-1))
+
+        token = create_access_token(self.passenger.id, self.passenger.role)
+        with patch.object(AsyncSession, "commit", invalid_commit):
+            with self.assertRaises(IntegrityError) as raised:
+                await self.client.post(
+                    f"/bookings/{self.ride_id}", headers={"Authorization": f"Bearer {token}"},
+                )
+        self.assertEqual(raised.exception.orig.sqlstate, "23514")
+        self.assertEqual(await self.state(), before)
+
+    async def test_negative_ride_inputs_return_validation_errors(self):
+        token = create_access_token(self.driver.id, self.driver.role)
+        payload = {
+            "origin": "Peshawar", "destination": "Islamabad",
+            "departure_time": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "available_seats": 2, "fare_per_seat": 500,
+        }
+        for field in ("available_seats", "fare_per_seat"):
+            with self.subTest(field=field):
+                response = await self.client.post(
+                    "/rides/", json={**payload, field: -1},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertTrue(any(error["loc"] == ["body", field]
+                                    for error in response.json()["detail"]))
+
+    async def test_zero_ride_seats_and_fare_remain_valid(self):
+        token = create_access_token(self.driver.id, self.driver.role)
+        response = await self.client.post(
+            "/rides/", json={
+                "origin": "Peshawar", "destination": "Islamabad",
+                "departure_time": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                "available_seats": 0, "fare_per_seat": 0,
+            }, headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -37,19 +38,30 @@ async def book_ride(
         select(Booking).where(
             Booking.ride_id == ride_id,
             Booking.passenger_id == current_user.id,
-            Booking.status != BookingStatus.rejected,
-            Booking.status != BookingStatus.cancelled,
+            Booking.status.in_([BookingStatus.pending, BookingStatus.accepted]),
         )
     )
     if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="You already booked this ride")
+        raise HTTPException(status_code=409, detail="You already booked this ride")
 
     booking = Booking(
         ride_id=ride_id,
         passenger_id=current_user.id,
     )
     db.add(booking)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        # asyncpg exposes PostgreSQL's constraint name on the original cause.
+        # Do not misclassify unrelated integrity errors as duplicate bookings.
+        cause = exc.orig.__cause__
+        if (
+            getattr(exc.orig, "sqlstate", None) == "23505"
+            and getattr(cause, "constraint_name", None) == "uq_bookings_active_passenger_ride"
+        ):
+            raise HTTPException(status_code=409, detail="You already booked this ride") from None
+        raise
     await db.refresh(booking)
     return booking
 

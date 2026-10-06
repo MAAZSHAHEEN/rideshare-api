@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Integer, String, DateTime, Enum as SAEnum, ForeignKey
+from sqlalchemy import CheckConstraint, Column, Index, Integer, String, DateTime, Enum as SAEnum, ForeignKey, text
 from database import Base
 
 
@@ -33,6 +33,10 @@ class User(Base):
 
 class Ride(Base):
     __tablename__ = "rides"
+    __table_args__ = (
+        CheckConstraint('available_seats >= 0', name='ck_rides_available_seats_nonnegative'),
+        CheckConstraint('fare_per_seat >= 0', name='ck_rides_fare_per_seat_nonnegative'),
+    )
 
     id              = Column(Integer, primary_key=True, index=True)
     driver_id       = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -41,7 +45,7 @@ class Ride(Base):
     departure_time  = Column(DateTime(timezone=True), nullable=False)
     available_seats = Column(Integer, nullable=False)
     fare_per_seat   = Column(Integer, nullable=False)
-    status          = Column(SAEnum(RideStatus), default=RideStatus.active)
+    status          = Column(SAEnum(RideStatus), nullable=False, default=RideStatus.active)
     created_at      = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class BookingStatus(str, enum.Enum):
@@ -53,9 +57,15 @@ class BookingStatus(str, enum.Enum):
 
 class Booking(Base):
     __tablename__ = "bookings"
+    __table_args__ = (
+        Index(
+            'uq_bookings_active_passenger_ride', 'ride_id', 'passenger_id',
+            unique=True, postgresql_where=text("status IN ('pending', 'accepted')"),
+        ),
+    )
 
     id         = Column(Integer, primary_key=True, index=True)
     ride_id    = Column(Integer, ForeignKey("rides.id"), nullable=False)
     passenger_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    status     = Column(SAEnum(BookingStatus), default=BookingStatus.pending)
+    status     = Column(SAEnum(BookingStatus), nullable=False, default=BookingStatus.pending)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

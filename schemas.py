@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
 from typing import Literal
 from models import UserRole, RideStatus, BookingStatus
@@ -36,8 +36,8 @@ class RideCreate(BaseModel):
     origin:          str
     destination:     str
     departure_time:  datetime
-    available_seats: int
-    fare_per_seat:   int
+    available_seats: int = Field(ge=0)
+    fare_per_seat:   int = Field(ge=0)
 
 
 class RideResponse(BaseModel):
