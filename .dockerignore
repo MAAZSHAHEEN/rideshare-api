@@ -1,0 +1,44 @@
+# Secrets and local environment files (including nested copies).
+.env
+.env.*
+**/.env
+**/.env.*
+**/.aws
+
+# Version control and local deployment/editor/agent metadata.
+**/.git
+**/.gitignore
+**/.fastapicloud
+**/.vscode
+**/.idea
+**/.cursor
+**/.codex
+**/.agents
+**/*.swp
+**/*.swo
+**/*~
+
+# Virtual environments and Python/build caches.
+**/venv
+**/.venv
+**/env
+**/ENV
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.egg-info
+**/build
+**/dist
+**/.cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Test code and test/coverage artifacts are not needed by the runtime image.
+tests
+**/.pytest_cache
+**/.tox
+**/.nox
+**/.coverage
+**/.coverage.*
+**/coverage.xml
+**/htmlcov
