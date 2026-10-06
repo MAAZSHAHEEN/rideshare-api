@@ -102,7 +102,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as connection:
             return await connection.run_sync(inspect_schema)
 
-    async def assert_metadata_matches(self, metadata=None, revision_id="7c2e9a4b6d10"):
+    async def assert_metadata_matches(self, metadata=None, revision_id="b83d12f7a906"):
         metadata = metadata if metadata is not None else Base.metadata
 
         def compare(connection):
@@ -154,10 +154,17 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["sequences"], {"users_id_seq", "rides_id_seq", "bookings_id_seq"})
         return state
 
-    def task4_metadata(self):
+    def task5_metadata(self):
         metadata = MetaData()
         for table in Base.metadata.sorted_tables:
             table.to_metadata(metadata)
+        rides = metadata.tables["rides"]
+        rides.indexes = {index for index in rides.indexes
+                         if index.name != "ix_rides_status_departure_time_id"}
+        return metadata
+
+    def task4_metadata(self):
+        metadata = self.task5_metadata()
         rides = metadata.tables["rides"]
         rides.constraints = {constraint for constraint in rides.constraints
                              if not isinstance(constraint, CheckConstraint)}
@@ -261,8 +268,8 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_integrity_revision_upgrade_downgrade_and_restore(self):
         await self.prepare_integrity_data("50872040220b")
         await self.assert_metadata_matches(self.task4_metadata(), "50872040220b")
-        await self.run_python("-m", "alembic", "upgrade", "head")
-        await self.assert_metadata_matches()
+        await self.run_python("-m", "alembic", "upgrade", "7c2e9a4b6d10")
+        await self.assert_metadata_matches(self.task5_metadata(), "7c2e9a4b6d10")
         await self.run_python("-m", "alembic", "downgrade", "-1")
         await self.assert_metadata_matches(self.task4_metadata(), "50872040220b")
         # DDL downgrade removes enforcement, without removing the original data.
@@ -277,6 +284,22 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         await self.run_python("-m", "alembic", "upgrade", "head")
         await self.assert_metadata_matches()
         await self.assert_sql_rejected("UPDATE rides SET available_seats = -1", "23514", "ck_rides_available_seats_nonnegative")
+
+    async def test_ride_search_index_upgrade_downgrade_reupgrade(self):
+        await self.prepare_integrity_data("7c2e9a4b6d10")
+        await self.assert_metadata_matches(self.task5_metadata(), "7c2e9a4b6d10")
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "head")
+            await self.assert_metadata_matches()
+            async with self.engine.connect() as connection:
+                indexes = await connection.run_sync(lambda conn: inspect(conn).get_indexes("rides"))
+                index = next(item for item in indexes if item["name"] == "ix_rides_status_departure_time_id")
+                self.assertEqual(index["column_names"], ["status", "departure_time", "id"])
+                self.assertFalse(index["unique"])
+                self.assertEqual(await connection.scalar(text("SELECT count(*) FROM rides")), 1)
+            if attempt == 0:
+                await self.run_python("-m", "alembic", "downgrade", "-1")
+                await self.assert_metadata_matches(self.task5_metadata(), "7c2e9a4b6d10")
 
     async def test_invalid_existing_data_aborts_migration_without_rewriting_rows(self):
         await self.prepare_integrity_data("50872040220b")

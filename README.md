@@ -32,6 +32,38 @@ https://rideshare-api.fastapicloud.dev/docs
 - POST /rides/ — create ride (driver only)
 - GET /rides/ — search rides by origin and destination
 
+Ride creation requires a timezone-aware departure strictly in the future (for
+example, an ISO 8601 timestamp with `Z` or `+05:00`). Naive or already-departed
+timestamps return 422. Times are compared in UTC.
+
+`GET /rides/` requires authentication and returns a JSON list for all roles.
+Only active rides with sufficient seats and departure strictly after the
+request's current UTC time are searchable. Completed, cancelled, sold-out,
+and departed rides are excluded; there is no status override.
+
+Optional query parameters:
+
+- `origin`, `destination`: exact, case-sensitive matches; either or both may
+  be omitted. Empty strings are invalid. Whitespace is not trimmed.
+- `departure_from`: inclusive lower departure bound.
+- `departure_before`: exclusive upper departure bound. Both time bounds require
+  a timezone offset; when supplied together, the lower must precede the upper.
+  Use midnight-to-midnight bounds to search a calendar day in a chosen timezone.
+  A past lower bound never includes already-departed rides.
+- `min_seats`: minimum available seats, default 1, range 1 through 2147483647.
+- `limit`: default 20, range 1 through 100.
+- `offset`: default 0, range 0 through 9223372036854775807.
+
+Invalid query values return 422. SQL applies filters before pagination and orders
+by `departure_time ASC, id ASC`. The response remains a list without a total count.
+Existing callers passing both locations still work, but now receive bounded,
+future-only results. Offset pages can shift as rides are added or changed.
+
+Revision `b83d12f7a906` adds `ix_rides_status_departure_time_id` on
+`(status, departure_time, id)` for the shared active/future/ordered query path.
+Apply it with `alembic upgrade head`. This ordinary transactional index build
+can block writes while it runs; schedule it appropriately for populated databases.
+
 ### Bookings
 - POST /bookings/{ride_id} — book a ride (passenger only)
 - PATCH /bookings/{booking_id}/respond — accept or reject booking (driver only)

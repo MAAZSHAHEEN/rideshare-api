@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, EmailStr, Field, field_validator
 from datetime import datetime
 from typing import Literal
 from models import UserRole, RideStatus, BookingStatus
@@ -51,7 +51,7 @@ class Token(BaseModel):
 class RideCreate(BaseModel):
     origin:          str
     destination:     str
-    departure_time:  datetime
+    departure_time:  AwareDatetime
     available_seats: int = Field(ge=0)
     fare_per_seat:   int = Field(ge=0)
 

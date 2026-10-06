@@ -34,6 +34,7 @@ class User(Base):
 class Ride(Base):
     __tablename__ = "rides"
     __table_args__ = (
+        Index('ix_rides_status_departure_time_id', 'status', 'departure_time', 'id'),
         CheckConstraint('available_seats >= 0', name='ck_rides_available_seats_nonnegative'),
         CheckConstraint('fare_per_seat >= 0', name='ck_rides_fare_per_seat_nonnegative'),
     )
