@@ -133,6 +133,32 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.begin() as connection:
             await connection.execute(update(Ride).where(Ride.id == self.ride_id).values(**values))
 
+    async def cancel_ride_request(self, ride_id=None, user=None):
+        user = user or self.driver
+        token = create_access_token(user.id, user.role)
+        return await self.client.patch(
+            f"/rides/{ride_id if ride_id is not None else self.ride_id}/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    async def create_booking_request(self):
+        token = create_access_token(self.passenger.id, self.passenger.role)
+        return await self.client.post(
+            f"/bookings/{self.ride_id}", headers={"Authorization": f"Bearer {token}"},
+        )
+
+    async def assert_cancelled_ride(self, expected_seats=2):
+        async with AsyncSession(self.engine) as session:
+            ride = await session.get(Ride, self.ride_id)
+            self.assertEqual(ride.status, RideStatus.cancelled)
+            self.assertEqual(ride.available_seats, expected_seats)
+            self.assertGreaterEqual(ride.available_seats, 0)
+            active_count = await session.scalar(select(func.count()).select_from(Booking).where(
+                Booking.ride_id == self.ride_id,
+                Booking.status.in_([BookingStatus.pending, BookingStatus.accepted]),
+            ))
+            self.assertEqual(active_count, 0, "Cancelled ride retained live bookings")
+
     async def contended_responses(self, decisions, while_locked=None):
         return await self.contended_operations([
             lambda booking_id=booking_id, accept=accept: self.respond(booking_id, accept)
@@ -585,6 +611,221 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(active_count, 1)
                     self.assertEqual((await session.get(Ride, self.ride_id)).available_seats, 2)
                 self.booking_ids[0] = response.json()["id"]
+
+
+    async def test_ride_cancellation_cancels_live_bookings_and_preserves_history(self):
+        self.assertEqual((await self.respond(self.booking_ids[0], True)).status_code, 200)
+        async with AsyncSession(self.engine, expire_on_commit=False) as session:
+            historical = [Booking(ride_id=self.ride_id, passenger_id=self.passenger.id, status=status)
+                          for status in (BookingStatus.rejected, BookingStatus.cancelled)]
+            session.add_all(historical)
+            await session.commit()
+            history = {booking.id: booking.status for booking in historical}
+        response = await self.cancel_ride_request()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "cancelled")
+        self.assertEqual(response.json()["available_seats"], 2)
+        await self.assert_cancelled_ride()
+        async with AsyncSession(self.engine) as session:
+            rows = (await session.scalars(select(Booking).where(Booking.ride_id == self.ride_id))).all()
+            self.assertEqual({row.id: row.status for row in rows}, {
+                **dict.fromkeys(self.booking_ids, BookingStatus.cancelled), **history,
+            })
+
+    async def test_ride_cancellation_with_no_bookings_preserves_seat_count(self):
+        # A separate ride demonstrates scope: the original ride and its bookings survive.
+        async with AsyncSession(self.engine, expire_on_commit=False) as session:
+            empty = Ride(driver_id=self.driver.id, origin="A", destination="B",
+                         departure_time=datetime.now(timezone.utc) + timedelta(days=1),
+                         available_seats=7, fare_per_seat=0)
+            session.add(empty)
+            await session.commit()
+            empty_id = empty.id
+        response = await self.cancel_ride_request(ride_id=empty_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(await self.state(), (2, [BookingStatus.pending, BookingStatus.pending]))
+        async with AsyncSession(self.engine) as session:
+            self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
+        self.ride_id = empty_id
+        await self.assert_cancelled_ride(expected_seats=7)
+
+    async def test_ride_cancellation_requires_owning_driver(self):
+        before = await self.state()
+        for user in (self.other_driver, self.passenger, self.admin):
+            with self.subTest(role=user.role):
+                response = await self.cancel_ride_request(user=user)
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(await self.state(), before)
+        async with AsyncSession(self.engine) as session:
+            self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
+
+    async def test_ride_cancellation_requires_authentication(self):
+        for headers in ({}, {"Authorization": "Bearer malformed"}):
+            response = await self.client.patch(f"/rides/{self.ride_id}/cancel", headers=headers)
+            self.assertIn(response.status_code, (401, 403), response.text)
+        async with AsyncSession(self.engine) as session:
+            self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
+
+    async def test_ride_cancellation_missing_ride_returns_404(self):
+        response = await self.cancel_ride_request(ride_id=self.ride_id + 1)
+        self.assertEqual(response.status_code, 404, response.text)
+
+    async def test_ride_cancellation_terminal_rides_conflict(self):
+        await self.update_ride(status=RideStatus.completed)
+        before = await self.state()
+        response = await self.cancel_ride_request()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(await self.state(), before)
+        async with AsyncSession(self.engine) as session:
+            self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.completed)
+        await self.update_ride(status=RideStatus.active)
+        self.assertEqual((await self.cancel_ride_request()).status_code, 200)
+        self.assertEqual((await self.cancel_ride_request()).status_code, 409)
+        await self.assert_cancelled_ride()
+
+    async def test_two_concurrent_ride_cancellations_restore_seats_once(self):
+        for booking_id in self.booking_ids:
+            self.assertEqual((await self.respond(booking_id, True)).status_code, 200)
+        self.assertEqual((await self.state())[0], 0)
+        self.preload_state = True
+        responses = await self.contended_operations([self.cancel_ride_request, self.cancel_ride_request])
+        self.assert_one_winner(responses)
+        await self.assert_cancelled_ride()
+
+    async def test_booking_creation_then_ride_cancellation_cancels_new_booking(self):
+        self.assertEqual((await self.cancel()).status_code, 200)
+        self.preload_state = True
+        responses = await self.contended_operations([self.create_booking_request, self.cancel_ride_request])
+        self.assertEqual([response.status_code for response in responses], [201, 200])
+        new_id = responses[0].json()["id"]
+        async with AsyncSession(self.engine) as session:
+            self.assertEqual((await session.get(Booking, new_id)).status, BookingStatus.cancelled)
+        await self.assert_cancelled_ride()
+
+    async def test_ride_cancellation_then_booking_creation_refreshes_stale_ride(self):
+        self.assertEqual((await self.cancel()).status_code, 200)
+        self.preload_state = True
+        responses = await self.contended_operations([self.cancel_ride_request, self.create_booking_request])
+        self.assertEqual([response.status_code for response in responses], [200, 400])
+        self.assertEqual(responses[1].json()["detail"], "Ride is not active")
+        self.assertEqual((await self.create_booking_request()).status_code, 400)
+        self.assertEqual(len((await self.state())[1]), 2)
+        await self.assert_cancelled_ride()
+
+    async def test_acceptance_then_ride_cancellation_reverses_known_debit(self):
+        self.preload_state = True
+        responses = await self.contended_operations([
+            lambda: self.respond(self.booking_ids[0], True), self.cancel_ride_request,
+        ])
+        self.assertEqual([response.status_code for response in responses], [200, 200])
+        await self.assert_cancelled_ride()
+
+    async def test_ride_cancellation_then_acceptance_conflicts(self):
+        self.preload_state = True
+        responses = await self.contended_operations([
+            self.cancel_ride_request, lambda: self.respond(self.booking_ids[0], True),
+        ])
+        self.assertEqual([response.status_code for response in responses], [200, 409])
+        await self.assert_cancelled_ride()
+
+    async def test_rejection_then_ride_cancellation_preserves_rejection(self):
+        self.preload_state = True
+        responses = await self.contended_operations([
+            lambda: self.respond(self.booking_ids[0], False), self.cancel_ride_request,
+        ])
+        self.assertEqual([response.status_code for response in responses], [200, 200])
+        self.assertEqual((await self.state())[1], [BookingStatus.rejected, BookingStatus.cancelled])
+        await self.assert_cancelled_ride()
+
+    async def test_ride_cancellation_then_rejection_conflicts(self):
+        self.preload_state = True
+        responses = await self.contended_operations([
+            self.cancel_ride_request, lambda: self.respond(self.booking_ids[0], False),
+        ])
+        self.assertEqual([response.status_code for response in responses], [200, 409])
+        await self.assert_cancelled_ride()
+
+    async def test_passenger_cancellation_then_ride_cancellation_does_not_double_restore(self):
+        self.assertEqual((await self.respond(self.booking_ids[0], True)).status_code, 200)
+        self.preload_state = True
+        responses = await self.contended_operations([self.cancel, self.cancel_ride_request])
+        self.assertEqual([response.status_code for response in responses], [200, 200])
+        await self.assert_cancelled_ride()
+
+    async def test_ride_cancellation_then_passenger_cancellation_conflicts(self):
+        self.assertEqual((await self.respond(self.booking_ids[0], True)).status_code, 200)
+        self.preload_state = True
+        responses = await self.contended_operations([self.cancel_ride_request, self.cancel])
+        self.assertEqual([response.status_code for response in responses], [200, 409])
+        await self.assert_cancelled_ride()
+
+    async def test_ride_cancellation_refreshes_ownership_and_status_after_wait(self):
+        self.preload_state = True
+        for values, code in (({"driver_id": self.other_driver.id}, 403),
+                             ({"status": RideStatus.completed}, 409)):
+            with self.subTest(values=values):
+                await self.update_ride(driver_id=self.driver.id, status=RideStatus.active)
+
+                async def change_ride(connection):
+                    await connection.execute(update(Ride).where(Ride.id == self.ride_id).values(**values))
+
+                responses = await self.contended_operations([self.cancel_ride_request], change_ride)
+                self.assertEqual(responses[0].status_code, code, responses[0].text)
+                self.assertEqual(await self.state(), (2, [BookingStatus.pending, BookingStatus.pending]))
+                async with AsyncSession(self.engine) as session:
+                    self.assertNotEqual((await session.get(Ride, self.ride_id)).status, RideStatus.cancelled)
+
+    async def test_ride_cancellation_commit_failure_rolls_back_all_changes(self):
+        self.assertEqual((await self.respond(self.booking_ids[0], True)).status_code, 200)
+        before = await self.state()
+        original_rollback = AsyncSession.rollback
+        changed_objects = []
+        rollbacks = []
+
+        async def fail_after_flush(session):
+            changed_objects.extend(session.dirty)
+            await session.flush()
+            self.assertEqual(await session.scalar(select(Ride.status).where(Ride.id == self.ride_id)),
+                             RideStatus.cancelled)
+            self.assertEqual(await session.scalar(select(func.count()).select_from(Booking).where(
+                Booking.ride_id == self.ride_id, Booking.status != BookingStatus.cancelled,
+            )), 0)
+            # Separate connection sees no partial effects, including ride status.
+            self.assertEqual(await self.state(), before)
+            async with AsyncSession(self.engine) as observer:
+                self.assertEqual((await observer.get(Ride, self.ride_id)).status, RideStatus.active)
+            raise RuntimeError("simulated ride cancellation commit failure")
+
+        async def record_rollback(session):
+            await original_rollback(session)
+            rollbacks.append(session)
+            self.assertEqual(len(changed_objects), 3)  # Ride and both live bookings.
+            self.assertTrue(all(inspect(obj).expired for obj in changed_objects))
+
+        with patch.object(AsyncSession, "commit", fail_after_flush):
+            with patch.object(AsyncSession, "rollback", record_rollback):
+                with self.assertRaisesRegex(RuntimeError, "simulated ride cancellation commit failure"):
+                    await self.cancel_ride_request()
+        self.assertEqual(len(rollbacks), 1)
+        self.assertEqual(await self.state(), before)
+        async with AsyncSession(self.engine) as session:
+            self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
+
+    async def test_ride_cancellation_database_failure_is_not_a_lifecycle_conflict(self):
+        self.assertEqual((await self.respond(self.booking_ids[0], True)).status_code, 200)
+        before = await self.state()
+
+        async def invalid_commit(session):
+            await session.flush()
+            await session.execute(update(Ride).where(Ride.id == self.ride_id).values(fare_per_seat=-1))
+
+        with patch.object(AsyncSession, "commit", invalid_commit):
+            with self.assertRaises(IntegrityError) as raised:
+                await self.cancel_ride_request()
+        self.assertEqual(raised.exception.orig.sqlstate, "23514")
+        self.assertEqual(await self.state(), before)
+        async with AsyncSession(self.engine) as session:
+            self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
 
 
 if __name__ == "__main__":

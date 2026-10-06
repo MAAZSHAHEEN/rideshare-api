@@ -64,6 +64,20 @@ Revision `b83d12f7a906` adds `ix_rides_status_departure_time_id` on
 Apply it with `alembic upgrade head`. This ordinary transactional index build
 can block writes while it runs; schedule it appropriately for populated databases.
 
+`PATCH /rides/{ride_id}/cancel` lets only the owning driver transition an active
+ride to cancelled. It returns the existing ride JSON (200). Missing rides return
+404, completed/already-cancelled rides return 409, and other drivers, passengers,
+or admins receive 403.
+
+The transaction locks the Ride first, then its pending/accepted bookings ordered
+by booking ID. Those bookings become cancelled; rejected/cancelled history is
+preserved. Each accepted booking cancelled restores one previously consumed seat,
+matching passenger cancellation. Pending bookings restore none. This reverses
+known debits without reconstructing original capacity; the count on a cancelled
+ride is bookkeeping, not usable capacity. The ride, bookings, and seat adjustments
+commit together. A cancelled ride has no pending/accepted bookings and cannot
+receive new bookings. Concurrent booking actions serialize on the same Ride lock.
+
 ### Bookings
 - POST /bookings/{ride_id} — book a ride (passenger only)
 - PATCH /bookings/{booking_id}/respond — accept or reject booking (driver only)

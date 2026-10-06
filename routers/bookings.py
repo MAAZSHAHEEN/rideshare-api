@@ -72,7 +72,10 @@ async def book_ride(
 
     # Lock the ride row for the duration of this transaction to prevent
     # concurrent requests from double-booking the last seat.
-    result = await db.execute(select(Ride).where(Ride.id == ride_id).with_for_update())
+    result = await db.execute(
+        select(Ride).where(Ride.id == ride_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )
     ride = result.scalar_one_or_none()
 
     if not ride:

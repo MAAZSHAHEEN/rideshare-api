@@ -6,11 +6,56 @@ from pydantic import AwareDatetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
-from models import Ride, RideStatus, User, UserRole
+from models import Booking, BookingStatus, Ride, RideStatus, User, UserRole
 from schemas import RideCreate, RideResponse
 from routers.dependencies import get_current_user
 
 router = APIRouter(prefix="/rides", tags=["Rides"])
+
+
+@router.patch("/{ride_id}/cancel", response_model=RideResponse)
+async def cancel_ride(
+    ride_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != UserRole.driver:
+        raise HTTPException(status_code=403, detail="Only drivers can cancel rides")
+
+    try:
+        ride = await db.scalar(
+            select(Ride).where(Ride.id == ride_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if ride is None:
+            raise HTTPException(status_code=404, detail="Ride not found")
+        if ride.driver_id != current_user.id:
+            raise HTTPException(status_code=403, detail="This is not your ride")
+        if ride.status != RideStatus.active:
+            raise HTTPException(status_code=409, detail="Ride is not active")
+
+        # All booking writers lock Ride first. Holding it prevents new bookings
+        # or decisions while we lock the live bookings in a consistent order.
+        bookings = (await db.scalars(
+            select(Booking).where(
+                Booking.ride_id == ride_id,
+                Booking.status.in_([BookingStatus.pending, BookingStatus.accepted]),
+            ).order_by(Booking.id.asc()).with_for_update()
+            .execution_options(populate_existing=True)
+        )).all()
+        for booking in bookings:
+            if booking.status == BookingStatus.accepted:
+                # Reverse a known debit, without inferring an original capacity.
+                ride.available_seats += 1
+            booking.status = BookingStatus.cancelled
+        ride.status = RideStatus.cancelled
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    await db.refresh(ride)
+    return ride
 
 
 @router.post("/", response_model=RideResponse, status_code=201)
