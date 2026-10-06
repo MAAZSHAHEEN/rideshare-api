@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI,Depends
-from database import engine, Base
+from sqlalchemy import text
+from database import engine
 import models  # noqa: F401 - imported for SQLAlchemy model registration
 from routers import auth
 from routers.dependencies import get_current_user
@@ -10,8 +11,9 @@ from routers import bookings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Alembic owns schema changes; startup only verifies database connectivity.
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
     yield
 
 app = FastAPI(lifespan=lifespan)
