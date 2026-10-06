@@ -44,6 +44,8 @@ async def cancel_booking(
             raise HTTPException(status_code=404, detail="Booking not found")
         if booking.passenger_id != current_user.id:
             raise HTTPException(status_code=403, detail="This is not your booking")
+        if ride.status != RideStatus.active:
+            raise HTTPException(status_code=409, detail="Ride is not active")
         if booking.status not in (BookingStatus.pending, BookingStatus.accepted):
             raise HTTPException(status_code=409, detail="Booking cannot be cancelled")
 

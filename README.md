@@ -78,13 +78,25 @@ ride is bookkeeping, not usable capacity. The ride, bookings, and seat adjustmen
 commit together. A cancelled ride has no pending/accepted bookings and cannot
 receive new bookings. Concurrent booking actions serialize on the same Ride lock.
 
+`PATCH /rides/{ride_id}/complete` lets only the owning driver transition an active
+ride to completed and returns the existing ride JSON (200). Missing rides return
+404; completed/cancelled rides return 409; other drivers, passengers, and admins
+receive 403. There is no reopening or automatic time-based completion.
+
+Completion locks and refreshes the Ride, then locks pending bookings in ID order.
+Pending requests become cancelled, while accepted/rejected/cancelled history is
+preserved. Seats never change during completion: accepted places remain consumed
+as historical accounting. All transitions commit atomically with rollback on
+failure. Completed rides have zero pending bookings. Completion and cancellation
+serialize on the Ride lock, so exactly one terminal ride transition can win.
+
 ### Bookings
 - POST /bookings/{ride_id} — book a ride (passenger only)
 - PATCH /bookings/{booking_id}/respond — accept or reject booking (driver only)
 
 `PATCH /bookings/{booking_id}/cancel` lets only the owning passenger cancel a
-pending or accepted booking. It returns the existing booking JSON with status
-`cancelled` (200). A pending cancellation does not change seats; an accepted
+pending or accepted booking on an active ride. It returns the existing booking
+JSON with status `cancelled` (200). A pending cancellation does not change seats; an accepted
 cancellation restores exactly one seat in the same transaction. Rejected or
 already-cancelled bookings return 409, another passenger or a non-passenger role
 receives 403, and a missing booking returns 404.
@@ -93,8 +105,11 @@ Cancellation and driver decisions serialize using PostgreSQL row locks in
 Ride -> Booking order. If acceptance wins first, acceptance and cancellation
 may both succeed with no net seat change. Cancelled history remains stored and
 does not prevent a new booking under the existing active-booking unique index.
-This endpoint adds no departure cutoff or ride-status restriction; those policies
-belong to later ride lifecycle work.
+Passenger cancellation on completed/cancelled rides returns 409. In particular,
+accepted bookings on completed rides cannot be cancelled or restore seats. If
+passenger cancellation wins the Ride lock before completion, its cancellation
+and any valid seat restoration persist; completion may then also succeed.
+No departure-time cutoff is imposed by this endpoint.
 
 ## Local Setup
 
