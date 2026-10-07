@@ -111,6 +111,22 @@ passenger cancellation wins the Ride lock before completion, its cancellation
 and any valid seat restoration persist; completion may then also succeed.
 No departure-time cutoff is imposed by this endpoint.
 
+API errors use FastAPI's existing `{"detail": ...}` response. Authentication
+failures return 401 with `WWW-Authenticate: Bearer`; login uses the same generic
+message for unknown accounts and incorrect passwords. Permission/ownership
+failures return 403 and missing resources return 404.
+
+State conflicts return 409, including inactive rides, unavailable seats,
+duplicate active bookings, invalid lifecycle transitions, and duplicate
+registration details. Registration conflicts use a generic message without
+identifying the conflicting field. FastAPI/Pydantic body and query validation
+returns 422 with an error list; existing departure/time-window checks return
+422 with a string detail. Successful response shapes are unchanged.
+
+Only the recognized duplicate-active-booking database constraint is translated
+to 409; unrelated database failures propagate normally. The `/test-db` diagnostic
+returns a generic 503 on connection failure without exposing exception text.
+
 ## Local Setup
 
 1. Clone the repo

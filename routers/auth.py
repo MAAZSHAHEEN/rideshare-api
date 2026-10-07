@@ -59,12 +59,12 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     # Check duplicate email
     result = await db.execute(select(User).where(User.email == user_data.email))
     if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=409, detail="Registration details already in use")
 
     # Check duplicate CNIC
     result = await db.execute(select(User).where(User.cnic == user_data.cnic))
     if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="CNIC already registered")
+        raise HTTPException(status_code=409, detail="Registration details already in use")
 
     new_user = User(
         name=user_data.name,

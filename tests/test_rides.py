@@ -124,6 +124,8 @@ class RideTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(params=params):
                 response = await self.client.get("/rides/", params=params, headers=self.headers())
                 self.assertEqual(response.status_code, 422, response.text)
+                self.assertEqual(set(response.json()), {"detail"})
+                self.assertIsInstance(response.json()["detail"], list)
 
     async def test_only_future_active_rides_with_seats_are_searchable(self):
         await self.seed(departure_time=NOW - timedelta(microseconds=1))
@@ -211,7 +213,8 @@ class RideTests(unittest.IsolatedAsyncioTestCase):
         for method in ("get", "post"):
             kwargs = {"json": self.payload()} if method == "post" else {}
             response = await getattr(self.client, method)("/rides/", **kwargs)
-            self.assertIn(response.status_code, (401, 403))
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
             response = await getattr(self.client, method)("/rides/", headers={"Authorization": "Bearer malformed"}, **kwargs)
             self.assertEqual(response.status_code, 401)
         self.assertEqual(await self.count_rides(), 1)

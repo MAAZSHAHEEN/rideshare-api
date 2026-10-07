@@ -279,6 +279,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         before = await self.state()
         response = await self.respond(self.booking_ids[0], True, self.other_driver)
         self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json(), {"detail": "This is not your ride"})
         self.assertEqual(await self.state(), before)
 
     async def test_only_drivers_can_respond(self):
@@ -287,11 +288,27 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(role=user.role):
                 response = await self.respond(self.booking_ids[0], True, user)
                 self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json(), {"detail": "Only drivers can respond to bookings"})
                 self.assertEqual(await self.state(), before)
 
     async def test_missing_booking_returns_404(self):
         response = await self.respond(max(self.booking_ids) + 1, True)
         self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json(), {"detail": "Booking not found"})
+
+    async def test_booking_creation_missing_ride_returns_404(self):
+        self.ride_id += 1
+        response = await self.create_booking_request()
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json(), {"detail": "Ride not found"})
+
+    async def test_booking_creation_capacity_conflict_returns_409(self):
+        await self.update_ride(available_seats=0)
+        before = await self.state()
+        response = await self.create_booking_request()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json(), {"detail": "No seats available"})
+        self.assertEqual(await self.state(), before)
 
     async def test_preloaded_booking_is_refreshed_after_lock_wait(self):
         self.preload_state = True
@@ -501,7 +518,9 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         before = await self.state()
         for headers in ({}, {"Authorization": "Bearer malformed"}):
             response = await self.client.patch(f"/bookings/{self.booking_ids[0]}/cancel", headers=headers)
-            self.assertIn(response.status_code, (401, 403), response.text)
+            self.assertEqual(response.status_code, 401, response.text)
+            self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+            self.assertEqual(set(response.json()), {"detail"})
             self.assertEqual(await self.state(), before)
 
     async def test_cancel_missing_booking_returns_404(self):
@@ -688,7 +707,9 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
     async def test_ride_cancellation_requires_authentication(self):
         for headers in ({}, {"Authorization": "Bearer malformed"}):
             response = await self.client.patch(f"/rides/{self.ride_id}/cancel", headers=headers)
-            self.assertIn(response.status_code, (401, 403), response.text)
+            self.assertEqual(response.status_code, 401, response.text)
+            self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+            self.assertEqual(set(response.json()), {"detail"})
         async with AsyncSession(self.engine) as session:
             self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
 
@@ -732,9 +753,9 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.cancel()).status_code, 200)
         self.preload_state = True
         responses = await self.contended_operations([self.cancel_ride_request, self.create_booking_request])
-        self.assertEqual([response.status_code for response in responses], [200, 400])
+        self.assertEqual([response.status_code for response in responses], [200, 409])
         self.assertEqual(responses[1].json()["detail"], "Ride is not active")
-        self.assertEqual((await self.create_booking_request()).status_code, 400)
+        self.assertEqual((await self.create_booking_request()).status_code, 409)
         self.assertEqual(len((await self.state())[1]), 2)
         await self.assert_cancelled_ride()
 
@@ -907,7 +928,9 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
     async def test_completion_requires_authentication(self):
         for headers in ({}, {"Authorization": "Bearer malformed"}):
             response = await self.client.patch(f"/rides/{self.ride_id}/complete", headers=headers)
-            self.assertIn(response.status_code, (401, 403), response.text)
+            self.assertEqual(response.status_code, 401, response.text)
+            self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+            self.assertEqual(set(response.json()), {"detail"})
         async with AsyncSession(self.engine) as session:
             self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
 
@@ -919,7 +942,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.complete_ride_request()).status_code, 200)
         await self.assert_completed_ride()
         self.assertEqual((await self.complete_ride_request()).status_code, 409)
-        self.assertEqual((await self.create_booking_request()).status_code, 400)
+        self.assertEqual((await self.create_booking_request()).status_code, 409)
         for accept in (True, False):
             self.assertEqual((await self.respond(self.booking_ids[0], accept)).status_code, 409)
         self.assertEqual((await self.cancel()).status_code, 409)
@@ -966,7 +989,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.cancel()).status_code, 200)
         self.preload_state = True
         responses = await self.contended_operations([self.complete_ride_request, self.create_booking_request])
-        self.assertEqual([response.status_code for response in responses], [200, 400])
+        self.assertEqual([response.status_code for response in responses], [200, 409])
         self.assertEqual(responses[1].json()["detail"], "Ride is not active")
         self.assertEqual(len((await self.state())[1]), 2)
         await self.assert_completed_ride()

@@ -153,6 +153,34 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/me", headers={"Authorization": f"Bearer {token}"})
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+        self.assertEqual(set(response.json()), {"detail"})
+        self.assertIsInstance(response.json()["detail"], str)
+
+    async def test_missing_empty_and_wrong_scheme_credentials_return_401(self):
+        for authorization in (None, "", "Bearer", "Basic invalid", "Digest invalid"):
+            with self.subTest(authorization=authorization):
+                headers = {} if authorization is None else {"Authorization": authorization}
+                response = await self.client.get("/me", headers=headers)
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+                self.assertEqual(response.json(), {"detail": "Not authenticated"})
+
+    async def test_duplicate_registration_returns_generic_conflict(self):
+        payload, _ = await self.register_user()
+        for field in ("email", "cnic"):
+            with self.subTest(field=field):
+                duplicate = {**self.payload("passenger"), field: payload[field]}
+                response = await self.client.post("/auth/register", json=duplicate)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json(), {"detail": "Registration details already in use"})
+                self.assertEqual(await self.connection.scalar(select(func.count()).select_from(User)), 1)
+
+    async def test_database_probe_failure_returns_generic_503(self):
+        with patch("main.engine") as engine:
+            engine.connect.side_effect = RuntimeError("private diagnostic must not escape")
+            response = await self.client.get("/test-db")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"detail": "Database unavailable"})
 
     async def token_claims(self):
         _, user = await self.register_user()

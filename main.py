@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI,Depends
+from fastapi import FastAPI,Depends,HTTPException
 from sqlalchemy import text
 from database import engine
 import models  # noqa: F401 - imported for SQLAlchemy model registration
@@ -32,8 +32,8 @@ async def test_db():
     try:
         async with engine.connect() as conn:
             return {"status": "Database connected!"}
-    except Exception as e:
-        return {"status": "Failed", "error": str(e)}
+    except Exception:
+        raise HTTPException(status_code=503, detail="Database unavailable") from None
 
 @app.get("/me")
 async def get_me(current_user: User = Depends(get_current_user)):

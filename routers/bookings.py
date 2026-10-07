@@ -83,9 +83,9 @@ async def book_ride(
     if not ride:
         raise HTTPException(status_code=404, detail="Ride not found")
     if ride.status != RideStatus.active:
-        raise HTTPException(status_code=400, detail="Ride is not active")
+        raise HTTPException(status_code=409, detail="Ride is not active")
     if ride.available_seats < 1:
-        raise HTTPException(status_code=400, detail="No seats available")
+        raise HTTPException(status_code=409, detail="No seats available")
 
     # Check if passenger already booked this ride
     result = await db.execute(
