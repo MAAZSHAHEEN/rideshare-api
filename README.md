@@ -151,6 +151,36 @@ returns a generic 503 on connection failure without exposing exception text.
 6. Start server
    uvicorn main:app --reload
 
+## CI and testing
+
+GitHub Actions runs one Python 3.11 job on pull requests and pushes to `main`
+and `rideshare-v2`. It uses a fresh PostgreSQL 15 service with a readiness health
+check, installs `requirements.txt`, validates configuration, applies Alembic from
+scratch, and runs the complete PostgreSQL unittest suite. Concurrency and
+migration upgrade/downgrade/re-upgrade tests are included. No developer `.env`
+or repository secrets are required; workflow credentials are disposable CI-only
+values. The GitHub token has read-only contents permission. This workflow does
+not deploy or publish images.
+
+To run the same commands locally, first provision a disposable PostgreSQL database
+whose user can create schemas and databases (`CREATEDB`). Set `DATABASE_URL` and
+`TEST_DATABASE_URL` to its `postgresql+asyncpg` connection URL, set a non-placeholder
+`SECRET_KEY` of at least 32 UTF-8 bytes, and set `ALGORITHM=HS256` and
+`ACCESS_TOKEN_EXPIRE_MINUTES=60` in the process environment. Never use a production
+database for these commands. From the repository root, with Python 3.11 activated:
+
+```sh
+python -m pip install -r requirements.txt
+python -m pip check
+python -m alembic upgrade head
+python -B -m unittest discover -s tests -v
+```
+
+`TEST_DATABASE_URL` must be set: integration tests otherwise skip. API tests
+isolate their fixtures in temporary schemas; migration tests create and remove
+their own disposable databases. The initial Alembic command migrates the database
+named by `DATABASE_URL`.
+
 ## Database Migrations
 
 Alembic owns the application schema. Run `alembic upgrade head` before starting
