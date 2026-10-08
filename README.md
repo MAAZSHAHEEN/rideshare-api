@@ -127,14 +127,17 @@ Only the recognized duplicate-active-booking database constraint is translated
 to 409; unrelated database failures propagate normally. The `/test-db` diagnostic
 returns a generic 503 on connection failure without exposing exception text.
 
-## Booking code organization
+## Ride and booking code organization
 
 `routers/bookings.py` declares the HTTP routes, dependencies, and response models.
 `services/bookings.py` implements booking creation, driver decisions, and passenger
 cancellation using the request's existing `AsyncSession`. It contains the business
 rules, queries, Ride -> Booking locks, seat accounting, commits, and existing
 rollback/error behavior. Services retain the existing `HTTPException` contract;
-ride lifecycle operations remain in `routers/rides.py`.
+`routers/rides.py` likewise keeps route declarations, authentication dependencies,
+query validation, and response models. `services/rides.py` implements creation,
+search, cancellation, and completion with the same explicit session ownership,
+Ride -> Booking(s) lock order, and existing transaction/error behavior.
 
 ## Local Setup
 
