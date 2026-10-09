@@ -22,6 +22,27 @@ from models import Booking, BookingStatus, Ride, RideStatus, User, UserRole
 from schemas import RideCreate
 
 
+async def get_ride(ride_id: int, db: AsyncSession) -> Ride:
+    ride = await db.scalar(select(Ride).where(Ride.id == ride_id))
+    if ride is None:
+        raise HTTPException(status_code=404, detail="Ride not found")
+    return ride
+
+
+async def list_my_rides(
+    db: AsyncSession, current_user: User, *,
+    status: RideStatus | None = None, limit: int = 20, offset: int = 0,
+) -> Sequence[Ride]:
+    if current_user.role != UserRole.driver:
+        raise HTTPException(status_code=403, detail="Only drivers can list their rides")
+    query = select(Ride).where(Ride.driver_id == current_user.id)
+    if status is not None:
+        query = query.where(Ride.status == status)
+    return (await db.scalars(query.order_by(
+        Ride.departure_time.desc(), Ride.id.desc(),
+    ).limit(limit).offset(offset))).all()
+
+
 async def complete_ride(
     ride_id: int,
     db: AsyncSession,

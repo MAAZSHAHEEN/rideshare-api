@@ -1,13 +1,28 @@
-from fastapi import APIRouter, Depends
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from models import User
+from models import BookingStatus, User
 from routers.dependencies import get_current_user
-from schemas import BookingResponse
+from schemas import BookingResponse, PassengerBookingResponse
 from services import bookings as booking_service
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
+
+
+@router.get("/me", response_model=list[PassengerBookingResponse])
+async def list_my_bookings(
+    status: BookingStatus | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await booking_service.list_my_bookings(
+        db, current_user, status=status, limit=limit, offset=offset,
+    )
 
 
 @router.patch("/{booking_id}/cancel", response_model=BookingResponse)

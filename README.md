@@ -127,7 +127,37 @@ Only the recognized duplicate-active-booking database constraint is translated
 to 409; unrelated database failures propagate normally. The `/test-db` diagnostic
 returns a generic 503 on connection failure without exposing exception text.
 
-## Ride and booking code organization
+## Frontend read endpoints
+
+All endpoints below require a bearer token. `GET /me` returns the typed
+`UserResponse` (id, name, email, role); it does not return CNIC or phone number.
+
+- `GET /rides/{ride_id}`: any authenticated role can read the existing ride
+  response, including departed, sold-out, completed and cancelled rides. Missing
+  rides return 404.
+- `GET /rides/me`: drivers only; returns only their own rides, with optional
+  `status=active|completed|cancelled`, ordered by departure time DESC, id DESC.
+- `GET /bookings/me`: passengers only; returns only their bookings, each with
+  a nested `ride` containing the existing ride response fields.
+- `GET /rides/{ride_id}/bookings`: owning driver only; each booking includes
+  `passenger: {id, name}`. No passenger email, CNIC, phone or password is returned.
+  Other drivers/non-driver roles receive 403; an owning-role lookup of a missing
+  ride receives 404.
+
+Both booking lists order by booking id DESC and accept optional
+`status=pending|accepted|rejected|cancelled`. All three collections include history
+by default and return plain lists with `limit` (default 20, range 1–100) and
+`offset` (default 0, range 0–9223372036854775807). Filters apply before pagination;
+invalid values return 422. These reads do not change lifecycle rules or seats.
+
+Set `FRONTEND_ORIGINS` to a comma-separated list of exact HTTP(S) frontend origins,
+for example `http://localhost:5173,http://127.0.0.1:5173` in development. Configure
+the deployed frontend origin explicitly in production. No paths, trailing slashes,
+credentials or wildcards are accepted. The default empty list disables cross-origin
+browser access. CORS allows GET/POST/PATCH with Authorization and Content-Type
+headers, without cookie credentials. CORS is not a replacement for authentication.
+
+## Ride and booking service responsibilities
 
 `routers/bookings.py` declares the HTTP routes, dependencies, and response models.
 `services/bookings.py` implements booking creation, driver decisions, and passenger

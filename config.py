@@ -1,8 +1,25 @@
 import os
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Comma-separated exact browser origins. Empty disables cross-origin access.
+FRONTEND_ORIGINS = [value.strip() for value in os.getenv("FRONTEND_ORIGINS", "").split(",")
+                    if value.strip()]
+for origin in FRONTEND_ORIGINS:
+    try:
+        parsed = urlsplit(origin)
+        valid = (parsed.scheme in {"http", "https"} and parsed.hostname
+                 and not parsed.username and not parsed.password
+                 and not parsed.path and not parsed.query and not parsed.fragment
+                 and "*" not in origin and not any(char.isspace() for char in origin))
+        parsed.port  # Validate a supplied port.
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RuntimeError("FRONTEND_ORIGINS must contain exact HTTP(S) origins without paths")
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")

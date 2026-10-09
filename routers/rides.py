@@ -4,12 +4,49 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import AwareDatetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
-from models import User
-from schemas import RideCreate, RideResponse
+from models import BookingStatus, RideStatus, User
+from schemas import DriverBookingResponse, RideCreate, RideResponse
 from routers.dependencies import get_current_user
 from services import rides as ride_service
+from services import bookings as booking_service
 
 router = APIRouter(prefix="/rides", tags=["Rides"])
+
+
+@router.get("/me", response_model=list[RideResponse])
+async def list_my_rides(
+    status: RideStatus | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await ride_service.list_my_rides(
+        db, current_user, status=status, limit=limit, offset=offset,
+    )
+
+
+@router.get("/{ride_id}", response_model=RideResponse)
+async def get_ride(
+    ride_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await ride_service.get_ride(ride_id, db)
+
+
+@router.get("/{ride_id}/bookings", response_model=list[DriverBookingResponse])
+async def list_ride_bookings(
+    ride_id: int,
+    status: BookingStatus | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await booking_service.list_ride_bookings(
+        ride_id, db, current_user, status=status, limit=limit, offset=offset,
+    )
 
 
 @router.patch("/{ride_id}/complete", response_model=RideResponse)

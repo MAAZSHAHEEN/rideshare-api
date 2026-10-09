@@ -76,3 +76,16 @@ class BookingResponse(BaseModel):
     ride_id:      int
     passenger_id: int
     status:       BookingStatus
+
+
+class PassengerSummary(BaseModel):
+    id: int
+    name: str
+
+
+class PassengerBookingResponse(BookingResponse):
+    ride: RideResponse
+
+
+class DriverBookingResponse(BookingResponse):
+    passenger: PassengerSummary

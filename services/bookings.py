@@ -20,6 +20,49 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Booking, BookingStatus, Ride, RideStatus, User, UserRole
+from schemas import DriverBookingResponse, PassengerBookingResponse, PassengerSummary, RideResponse
+
+
+async def list_my_bookings(
+    db: AsyncSession, current_user: User, *,
+    status: BookingStatus | None = None, limit: int = 20, offset: int = 0,
+) -> list[PassengerBookingResponse]:
+    if current_user.role != UserRole.passenger:
+        raise HTTPException(status_code=403, detail="Only passengers can list their bookings")
+    query = select(Booking, Ride).join(Ride, Booking.ride_id == Ride.id).where(
+        Booking.passenger_id == current_user.id,
+    )
+    if status is not None:
+        query = query.where(Booking.status == status)
+    rows = await db.execute(query.order_by(Booking.id.desc()).limit(limit).offset(offset))
+    return [PassengerBookingResponse(
+        id=booking.id, ride_id=booking.ride_id, passenger_id=booking.passenger_id,
+        status=booking.status, ride=RideResponse.model_validate(ride),
+    ) for booking, ride in rows]
+
+
+async def list_ride_bookings(
+    ride_id: int, db: AsyncSession, current_user: User, *,
+    status: BookingStatus | None = None, limit: int = 20, offset: int = 0,
+) -> list[DriverBookingResponse]:
+    if current_user.role != UserRole.driver:
+        raise HTTPException(status_code=403, detail="Only drivers can list ride bookings")
+    driver_id = await db.scalar(select(Ride.driver_id).where(Ride.id == ride_id))
+    if driver_id is None:
+        raise HTTPException(status_code=404, detail="Ride not found")
+    if driver_id != current_user.id:
+        raise HTTPException(status_code=403, detail="This is not your ride")
+    # Project only the passenger fields allowed in the response; no contact data.
+    query = select(Booking, User.id, User.name).join(
+        User, Booking.passenger_id == User.id,
+    ).where(Booking.ride_id == ride_id)
+    if status is not None:
+        query = query.where(Booking.status == status)
+    rows = await db.execute(query.order_by(Booking.id.desc()).limit(limit).offset(offset))
+    return [DriverBookingResponse(
+        id=booking.id, ride_id=booking.ride_id, passenger_id=booking.passenger_id,
+        status=booking.status, passenger=PassengerSummary(id=user_id, name=name),
+    ) for booking, user_id, name in rows]
 
 
 async def cancel_booking(
