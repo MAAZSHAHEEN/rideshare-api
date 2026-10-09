@@ -1,10 +1,14 @@
 """Booking operations using the caller's request-scoped AsyncSession.
 
 Each operation commits once on success and refreshes its returned booking.
-Existing cleanup boundaries are preserved: cancellation explicitly rolls back
-operation failures; creation rolls back commit-time IntegrityError. Other
-failures propagate to the caller, which must close/roll back its session (as
-get_db does for HTTP requests). No sessions or nested transactions are created.
+Creation and driver responses roll back pre-commit exceptions; cancellation
+retains its protected-operation rollback. Post-commit refresh is outside those
+handlers: failure there cannot undo a successful commit. The caller owns session
+closure, including cancellation cleanup. No hidden/nested transactions are used.
+
+These operations own the transaction on the supplied session, not an isolated
+part of it. Commit includes unrelated pending changes and rollback discards them.
+Use a clean session; these operations are not independently composable transactions.
 
 HTTPException intentionally preserves the existing API error contract without
 an additional exception translation layer.
@@ -73,42 +77,42 @@ async def book_ride(
     db: AsyncSession,
     current_user: User,
 ) -> Booking:
-    # Only passengers can book
-    if current_user.role != UserRole.passenger:
-        raise HTTPException(status_code=403, detail="Only passengers can book rides")
-
-    # Lock the ride row for the duration of this transaction to prevent
-    # concurrent requests from double-booking the last seat.
-    result = await db.execute(
-        select(Ride).where(Ride.id == ride_id).with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    ride = result.scalar_one_or_none()
-
-    if not ride:
-        raise HTTPException(status_code=404, detail="Ride not found")
-    if ride.status != RideStatus.active:
-        raise HTTPException(status_code=409, detail="Ride is not active")
-    if ride.available_seats < 1:
-        raise HTTPException(status_code=409, detail="No seats available")
-
-    # Check if passenger already booked this ride
-    result = await db.execute(
-        select(Booking).where(
-            Booking.ride_id == ride_id,
-            Booking.passenger_id == current_user.id,
-            Booking.status.in_([BookingStatus.pending, BookingStatus.accepted]),
-        )
-    )
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="You already booked this ride")
-
-    booking = Booking(
-        ride_id=ride_id,
-        passenger_id=current_user.id,
-    )
-    db.add(booking)
     try:
+        # Only passengers can book
+        if current_user.role != UserRole.passenger:
+            raise HTTPException(status_code=403, detail="Only passengers can book rides")
+
+        # Lock the ride row for the duration of this transaction to prevent
+        # concurrent requests from double-booking the last seat.
+        result = await db.execute(
+            select(Ride).where(Ride.id == ride_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        ride = result.scalar_one_or_none()
+
+        if not ride:
+            raise HTTPException(status_code=404, detail="Ride not found")
+        if ride.status != RideStatus.active:
+            raise HTTPException(status_code=409, detail="Ride is not active")
+        if ride.available_seats < 1:
+            raise HTTPException(status_code=409, detail="No seats available")
+
+        # Check if passenger already booked this ride
+        result = await db.execute(
+            select(Booking).where(
+                Booking.ride_id == ride_id,
+                Booking.passenger_id == current_user.id,
+                Booking.status.in_([BookingStatus.pending, BookingStatus.accepted]),
+            )
+        )
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="You already booked this ride")
+
+        booking = Booking(
+            ride_id=ride_id,
+            passenger_id=current_user.id,
+        )
+        db.add(booking)
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
@@ -121,6 +125,10 @@ async def book_ride(
         ):
             raise HTTPException(status_code=409, detail="You already booked this ride") from None
         raise
+    except Exception:
+        await db.rollback()
+        raise
+
     await db.refresh(booking)
     return booking
 
@@ -131,59 +139,64 @@ async def respond_to_booking(
     db: AsyncSession,
     current_user: User,
 ) -> Booking:
-    # Only drivers can respond
-    if current_user.role != UserRole.driver:
-        raise HTTPException(
-            status_code=403, detail="Only drivers can respond to bookings"
+    try:
+        # Only drivers can respond
+        if current_user.role != UserRole.driver:
+            raise HTTPException(
+                status_code=403, detail="Only drivers can respond to bookings"
+            )
+
+        # Read only the routing key, not booking state, before acquiring locks.
+        ride_id = await db.scalar(select(Booking.ride_id).where(Booking.id == booking_id))
+
+        if ride_id is None:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        # Always lock Ride -> Booking. Refresh any instances already in the session
+        # so decisions use database state after waiting for concurrent transactions.
+        result = await db.execute(
+            select(Ride)
+            .where(Ride.id == ride_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
+        ride = result.scalar_one_or_none()
 
-    # Read only the routing key, not booking state, before acquiring locks.
-    ride_id = await db.scalar(select(Booking.ride_id).where(Booking.id == booking_id))
+        if ride is None:
+            raise HTTPException(status_code=404, detail="Ride not found")
 
-    if ride_id is None:
-        raise HTTPException(status_code=404, detail="Booking not found")
+        if ride.driver_id != current_user.id:
+            raise HTTPException(status_code=403, detail="This is not your ride")
 
-    # Always lock Ride -> Booking. Refresh any instances already in the session
-    # so decisions use database state after waiting for concurrent transactions.
-    result = await db.execute(
-        select(Ride)
-        .where(Ride.id == ride_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    ride = result.scalar_one_or_none()
+        result = await db.execute(
+            select(Booking)
+            .where(Booking.id == booking_id, Booking.ride_id == ride_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        booking = result.scalar_one_or_none()
 
-    if ride is None:
-        raise HTTPException(status_code=404, detail="Ride not found")
+        if booking is None:
+            raise HTTPException(status_code=404, detail="Booking not found")
 
-    if ride.driver_id != current_user.id:
-        raise HTTPException(status_code=403, detail="This is not your ride")
+        if booking.status != BookingStatus.pending:
+            raise HTTPException(status_code=409, detail="Booking already responded to")
 
-    result = await db.execute(
-        select(Booking)
-        .where(Booking.id == booking_id, Booking.ride_id == ride_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    booking = result.scalar_one_or_none()
+        if ride.status != RideStatus.active:
+            raise HTTPException(status_code=409, detail="Ride is not active")
 
-    if booking is None:
-        raise HTTPException(status_code=404, detail="Booking not found")
+        if accept:
+            if ride.available_seats < 1:
+                raise HTTPException(status_code=409, detail="No seats available")
+            booking.status = BookingStatus.accepted
+            ride.available_seats -= 1
+        else:
+            booking.status = BookingStatus.rejected
 
-    if booking.status != BookingStatus.pending:
-        raise HTTPException(status_code=409, detail="Booking already responded to")
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
-    if ride.status != RideStatus.active:
-        raise HTTPException(status_code=409, detail="Ride is not active")
-
-    if accept:
-        if ride.available_seats < 1:
-            raise HTTPException(status_code=409, detail="No seats available")
-        booking.status = BookingStatus.accepted
-        ride.available_seats -= 1
-    else:
-        booking.status = BookingStatus.rejected
-
-    await db.commit()
     await db.refresh(booking)
     return booking

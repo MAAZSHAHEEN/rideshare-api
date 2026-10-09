@@ -1,10 +1,14 @@
 """Ride operations using the caller's request-scoped AsyncSession.
 
 Writes commit once and refresh the returned Ride. Cancellation and completion
-explicitly roll back failures inside their protected operation. Creation errors
-propagate to the caller for session cleanup, preserving existing behavior.
-Search only reads; the caller owns session cleanup. No sessions or nested
-transactions are created here. HTTPException preserves the existing API contract.
+explicitly roll back failures inside their protected operation. Creation rolls
+back pre-commit exceptions. Refresh remains outside rollback handlers because
+its failure cannot undo an earlier commit. Search only reads; the caller owns
+session closure, including cancellation cleanup. No hidden/nested transactions
+are created here. HTTPException preserves the existing API contract.
+
+Commit includes unrelated pending changes and rollback discards them. Supply a
+clean session: these operations are not independently composable transactions.
 """
 
 from collections.abc import Sequence
@@ -107,24 +111,29 @@ async def create_ride(
     db: AsyncSession,
     current_user: User
 ) -> Ride:
-    # Only drivers can create rides
-    if current_user.role != UserRole.driver:
-        raise HTTPException(status_code=403, detail="Only drivers can create rides")
+    try:
+        # Only drivers can create rides
+        if current_user.role != UserRole.driver:
+            raise HTTPException(status_code=403, detail="Only drivers can create rides")
 
-    departure_time = ride_data.departure_time.astimezone(timezone.utc)
-    if departure_time <= datetime.now(timezone.utc):
-        raise HTTPException(status_code=422, detail="Departure time must be in the future")
+        departure_time = ride_data.departure_time.astimezone(timezone.utc)
+        if departure_time <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=422, detail="Departure time must be in the future")
 
-    new_ride = Ride(
-        driver_id=current_user.id,
-        origin=ride_data.origin,
-        destination=ride_data.destination,
-        departure_time=departure_time,
-        available_seats=ride_data.available_seats,
-        fare_per_seat=ride_data.fare_per_seat,
-    )
-    db.add(new_ride)
-    await db.commit()
+        new_ride = Ride(
+            driver_id=current_user.id,
+            origin=ride_data.origin,
+            destination=ride_data.destination,
+            departure_time=departure_time,
+            available_seats=ride_data.available_seats,
+            fare_per_seat=ride_data.fare_per_seat,
+        )
+        db.add(new_ride)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
     await db.refresh(new_ride)
     return new_ride
 

@@ -6,6 +6,7 @@ import bcrypt
 from fastapi import APIRouter, Depends, HTTPException
 from jose import jwt
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -75,7 +76,20 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
         password=await run_in_threadpool(hash_password, user_data.password),
     )
     db.add(new_user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        # Only the existing PostgreSQL email/CNIC uniqueness rules are conflicts.
+        cause = exc.orig.__cause__
+        if (
+            getattr(exc.orig, "sqlstate", None) == "23505"
+            and getattr(cause, "constraint_name", None) in {"ix_users_email", "users_cnic_key"}
+        ):
+            raise HTTPException(
+                status_code=409, detail="Registration details already in use"
+            ) from None
+        raise
     await db.refresh(new_user)
     return new_user
 
