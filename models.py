@@ -20,7 +20,7 @@ class RideStatus(str, enum.Enum):
 class User(Base):
     __tablename__ = "users"
 
-    id           = Column(Integer, primary_key=True, index=True)
+    id           = Column(Integer, primary_key=True)
     name         = Column(String, nullable=False)
     email        = Column(String, unique=True, index=True, nullable=False)
     password     = Column(String, nullable=False)
@@ -39,7 +39,7 @@ class Ride(Base):
         CheckConstraint('fare_per_seat >= 0', name='ck_rides_fare_per_seat_nonnegative'),
     )
 
-    id              = Column(Integer, primary_key=True, index=True)
+    id              = Column(Integer, primary_key=True)
     driver_id       = Column(Integer, ForeignKey("users.id"), nullable=False)
     origin          = Column(String, nullable=False)
     destination     = Column(String, nullable=False)
@@ -65,7 +65,7 @@ class Booking(Base):
         ),
     )
 
-    id         = Column(Integer, primary_key=True, index=True)
+    id         = Column(Integer, primary_key=True)
     ride_id    = Column(Integer, ForeignKey("rides.id"), nullable=False)
     passenger_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     status     = Column(SAEnum(BookingStatus), nullable=False, default=BookingStatus.pending)

@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import CheckConstraint, Enum, MetaData, inspect, text
+from sqlalchemy import CheckConstraint, Enum, Index, MetaData, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -102,7 +102,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as connection:
             return await connection.run_sync(inspect_schema)
 
-    async def assert_metadata_matches(self, metadata=None, revision_id="b83d12f7a906"):
+    async def assert_metadata_matches(self, metadata=None, revision_id="d924a6e38f10"):
         metadata = metadata if metadata is not None else Base.metadata
 
         def compare(connection):
@@ -154,10 +154,15 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["sequences"], {"users_id_seq", "rides_id_seq", "bookings_id_seq"})
         return state
 
-    def task5_metadata(self):
+    def task7_metadata(self):
         metadata = MetaData()
         for table in Base.metadata.sorted_tables:
-            table.to_metadata(metadata)
+            historical_table = table.to_metadata(metadata)
+            Index(f"ix_{table.name}_id", historical_table.c.id)
+        return metadata
+
+    def task5_metadata(self):
+        metadata = self.task7_metadata()
         rides = metadata.tables["rides"]
         rides.indexes = {index for index in rides.indexes
                          if index.name != "ix_rides_status_departure_time_id"}
@@ -289,8 +294,8 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         await self.prepare_integrity_data("7c2e9a4b6d10")
         await self.assert_metadata_matches(self.task5_metadata(), "7c2e9a4b6d10")
         for attempt in range(2):
-            await self.run_python("-m", "alembic", "upgrade", "head")
-            await self.assert_metadata_matches()
+            await self.run_python("-m", "alembic", "upgrade", "b83d12f7a906")
+            await self.assert_metadata_matches(self.task7_metadata(), "b83d12f7a906")
             async with self.engine.connect() as connection:
                 indexes = await connection.run_sync(lambda conn: inspect(conn).get_indexes("rides"))
                 index = next(item for item in indexes if item["name"] == "ix_rides_status_departure_time_id")
@@ -300,6 +305,49 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
             if attempt == 0:
                 await self.run_python("-m", "alembic", "downgrade", "-1")
                 await self.assert_metadata_matches(self.task5_metadata(), "7c2e9a4b6d10")
+
+    async def test_redundant_id_indexes_upgrade_downgrade_reupgrade(self):
+        await self.prepare_integrity_data("b83d12f7a906")
+
+        async def inspect_constraints_and_indexes():
+            def snapshot(connection):
+                inspector = inspect(connection)
+                return {
+                    table: {
+                        "primary_key": inspector.get_pk_constraint(table),
+                        "unique": inspector.get_unique_constraints(table),
+                        "foreign_keys": inspector.get_foreign_keys(table),
+                        "checks": inspector.get_check_constraints(table),
+                        "indexes": {index["name"]: index
+                                    for index in inspector.get_indexes(table)},
+                    }
+                    for table in ("users", "rides", "bookings")
+                }
+
+            async with self.engine.connect() as connection:
+                return await connection.run_sync(snapshot)
+
+        original = await inspect_constraints_and_indexes()
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "head")
+            await self.assert_metadata_matches()
+            current = await inspect_constraints_and_indexes()
+            for table, before in original.items():
+                with self.subTest(attempt=attempt, table=table):
+                    redundant = f"ix_{table}_id"
+                    self.assertEqual(before["indexes"][redundant]["column_names"], ["id"])
+                    self.assertFalse(before["indexes"][redundant]["unique"])
+                    self.assertNotIn(redundant, current[table]["indexes"])
+                    self.assertEqual(current[table]["primary_key"]["constrained_columns"], ["id"])
+                    expected = {**before, "indexes": {
+                        name: index for name, index in before["indexes"].items()
+                        if name != redundant
+                    }}
+                    self.assertEqual(current[table], expected)
+            if attempt == 0:
+                await self.run_python("-m", "alembic", "downgrade", "-1")
+                await self.assert_metadata_matches(self.task7_metadata(), "b83d12f7a906")
+                self.assertEqual(await inspect_constraints_and_indexes(), original)
 
     async def test_invalid_existing_data_aborts_migration_without_rewriting_rows(self):
         await self.prepare_integrity_data("50872040220b")
