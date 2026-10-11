@@ -128,7 +128,7 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.client.post("/auth/register", json=self.payload(role))
                 self.assertEqual(response.status_code, 201, response.text)
                 body = response.json()
-                self.assertEqual(set(body), {"id", "name", "email", "role"})
+                self.assertEqual(set(body), {"id", "name", "email", "role", "allowed_modes"})
                 for field in ("password", "cnic", "phone_number"):
                     self.assertNotIn(field, body)
 
@@ -203,7 +203,7 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         me = await self.client.get("/me", headers={"Authorization": f"Bearer {token}"})
         self.assertEqual(me.status_code, 200)
         self.assertEqual(me.json()["id"], user["id"])
-        self.assertEqual(set(me.json()), {"id", "name", "email", "role"})
+        self.assertEqual(set(me.json()), {"id", "name", "email", "role", "allowed_modes"})
 
     async def test_incorrect_password_and_unknown_email_fail_consistently(self):
         payload, _ = await self.register_user()

@@ -109,15 +109,16 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_collections_enforce_role_and_ownership(self):
         rides, _ = await self.seed()
-        for actor in ("passenger", "other_passenger", "admin"):
-            for path in ("/rides/me", f"/rides/{rides[0].id}/bookings"):
-                response = await self.client.get(path, headers=self.headers(actor))
-                self.assertEqual(response.status_code, 403)
-        for actor in ("driver", "other_driver", "admin"):
-            response = await self.client.get("/bookings/me", headers=self.headers(actor))
+        for path in ("/rides/me", "/bookings/me", f"/rides/{rides[0].id}/bookings"):
+            response = await self.client.get(path, headers=self.headers("admin"))
             self.assertEqual(response.status_code, 403)
-        response = await self.client.get(f"/rides/{rides[0].id}/bookings", headers=self.headers("other_driver"))
-        self.assertEqual(response.status_code, 403)
+        for actor in ("passenger", "other_passenger", "other_driver"):
+            response = await self.client.get(f"/rides/{rides[0].id}/bookings", headers=self.headers(actor))
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json(), {"detail": "This is not your ride"})
+        for actor in ("passenger", "other_passenger", "driver", "other_driver"):
+            for path in ("/rides/me", "/bookings/me"):
+                await self.get(path, actor)
         response = await self.client.get("/rides/2147483647/bookings", headers=self.headers("driver"))
         self.assertEqual(response.status_code, 404)
         self.assertEqual(await self.get("/rides/me", "other_driver"), [])
@@ -216,7 +217,110 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
         for actor, user in self.users.items():
             self.assertEqual(await self.get("/me", actor), {
                 "id": user.id, "name": user.name, "email": user.email, "role": user.role.value,
+                "allowed_modes": [] if user.role == UserRole.admin else ["passenger", "driver"],
             })
+
+    def ride_payload(self):
+        return dict(origin="Peshawar", destination="Islamabad", available_seats=2,
+                    fare_per_seat=500, departure_time=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
+
+    async def request_as(self, method, path, actor, expected, **kwargs):
+        response = await self.client.request(method, path, headers=self.headers(actor), **kwargs)
+        self.assertEqual(response.status_code, expected, response.text)
+        return response.json()
+
+    async def test_legacy_accounts_use_both_modes_without_changing_identity_or_history(self):
+        # Fixtures predate any mode selection; no registration or role rewrite is needed.
+        identities = {actor: await self.get("/me", actor) for actor in ("passenger", "driver")}
+        for host, traveller in (("passenger", "driver"), ("driver", "passenger")):
+            with self.subTest(host=host):
+                ride = await self.request_as("POST", "/rides/", host, 201, json=self.ride_payload())
+                path = f'/bookings/{ride["id"]}'
+                first = await self.request_as("POST", path, traveller, 201)
+                await self.request_as("PATCH", f'/bookings/{first["id"]}/cancel', traveller, 200)
+                second = await self.request_as("POST", path, traveller, 201)
+                await self.request_as("PATCH", f'/bookings/{second["id"]}/respond', host, 200, params={"accept": True})
+                await self.request_as("PATCH", f'/bookings/{second["id"]}/cancel', traveller, 200)
+                self.assertEqual((await self.get(f'/rides/{ride["id"]}', host))["available_seats"], 2)
+                third = await self.request_as("POST", path, traveller, 201)
+                requests = await self.get(f'/rides/{ride["id"]}/bookings', host)
+                self.assertEqual({r["id"] for r in requests}, {first["id"], second["id"], third["id"]})
+                for row in requests:
+                    self.assertEqual(set(row["passenger"]), {"id", "name"})
+                await self.request_as("PATCH", f'/bookings/{third["id"]}/respond', host, 200, params={"accept": True})
+                completed = await self.request_as("PATCH", f'/rides/{ride["id"]}/complete', host, 200)
+                self.assertEqual((completed["status"], completed["available_seats"]), ("completed", 1))
+                # Alternating views uses the same account and keeps terminal history.
+                for _ in range(2):
+                    own = await self.get("/rides/me", host)
+                    history = await self.get("/bookings/me", traveller)
+                    self.assertIn(completed, own)
+                    self.assertEqual([b["status"] for b in history], ["accepted", "cancelled", "cancelled"])
+                    self.assertEqual({b["passenger_id"] for b in history}, {self.users[traveller].id})
+                extra = await self.request_as("POST", "/rides/", host, 201, json=self.ride_payload())
+                await self.request_as("PATCH", f'/rides/{extra["id"]}/cancel', host, 200)
+        for actor, before in identities.items():
+            self.assertEqual(await self.get("/me", actor), before)
+        async with AsyncSession(self.engine) as db:
+            stored = (await db.scalars(select(User))).all()
+            self.assertEqual(len(stored), len(self.users))
+            for user in stored:
+                original = self.users[user.name]
+                self.assertEqual((user.role, user.email, user.cnic, user.created_at, user.updated_at),
+                                 (original.role, original.email, original.cnic, original.created_at, original.updated_at))
+
+    async def test_self_booking_is_forbidden_for_both_legacy_roles(self):
+        for actor in ("passenger", "driver"):
+            ride = await self.request_as("POST", "/rides/", actor, 201, json=self.ride_payload())
+            response = await self.client.post(f'/bookings/{ride["id"]}',
+                                             headers={**self.headers(actor), "X-Mode": "passenger"},
+                                             params={"mode": "passenger"})
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json(), {"detail": "You cannot book your own ride"})
+            self.assertEqual(await self.get(f'/rides/{ride["id"]}/bookings', actor), [])
+            self.assertEqual((await self.get(f'/rides/{ride["id"]}', actor))["available_seats"], 2)
+
+    async def test_dual_mode_does_not_grant_cross_user_management(self):
+        ride = await self.request_as("POST", "/rides/", "passenger", 201, json=self.ride_payload())
+        booking = await self.request_as("POST", f'/bookings/{ride["id"]}', "driver", 201)
+        for actor in ("driver", "other_driver", "other_passenger"):
+            for action in ("cancel", "complete"):
+                await self.request_as("PATCH", f'/rides/{ride["id"]}/{action}', actor, 403)
+            for accept in (True, False):
+                await self.request_as("PATCH", f'/bookings/{booking["id"]}/respond', actor, 403,
+                                      params={"accept": accept})
+            await self.request_as("GET", f'/rides/{ride["id"]}/bookings', actor, 403)
+        for actor in ("passenger", "other_passenger", "other_driver"):
+            await self.request_as("PATCH", f'/bookings/{booking["id"]}/cancel', actor, 403)
+        async with AsyncSession(self.engine) as db:
+            self.assertEqual((await db.get(Booking, booking["id"])).status, BookingStatus.pending)
+            saved = await db.get(Ride, ride["id"])
+            self.assertEqual((saved.status, saved.available_seats), (RideStatus.active, 2))
+
+    async def test_admin_cannot_select_modes_even_when_it_owns_fixture_resources(self):
+        rides, bookings = await self.seed(driver="admin", passenger="admin")
+        self.assertEqual((await self.get("/me", "admin"))["allowed_modes"], [])
+        await self.request_as("POST", "/rides/", "admin", 403, json=self.ride_payload())
+        await self.request_as("POST", f"/bookings/{rides[0].id}", "admin", 403, params={"mode": "passenger"})
+        for action in ("cancel", "complete"):
+            await self.request_as("PATCH", f"/rides/{rides[0].id}/{action}", "admin", 403)
+        await self.request_as("PATCH", f"/bookings/{bookings[0].id}/respond", "admin", 403, params={"accept": True})
+        await self.request_as("PATCH", f"/bookings/{bookings[0].id}/cancel", "admin", 403)
+        for path in ("/rides/me", "/bookings/me", f"/rides/{rides[0].id}/bookings"):
+            await self.request_as("GET", path, "admin", 403)
+
+    async def test_duplicate_cnic_and_email_still_conflict_across_account_roles(self):
+        for existing_role, new_role in (("passenger", "driver"), ("driver", "passenger")):
+            existing = self.users[existing_role]
+            for field in ("cnic", "email"):
+                payload = dict(name="Duplicate", email="new@example.com", cnic="new-cnic",
+                               phone_number="03000000000", password="valid-test-password", role=new_role)
+                payload[field] = getattr(existing, field)
+                response = await self.client.post("/auth/register", json=payload)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json(), {"detail": "Registration details already in use"})
+        async with AsyncSession(self.engine) as db:
+            self.assertEqual(len((await db.scalars(select(User))).all()), len(self.users))
 
 
 class FrontendOpenAPITests(unittest.TestCase):

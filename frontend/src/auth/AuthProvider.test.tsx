@@ -5,14 +5,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from './AuthProvider';
 import type { User } from '../api/types';
 
-const user: User = { id: 1, name: 'Ayesha', email: 'a@example.com', role: 'passenger' };
+const user: User = { id: 1, name: 'Ayesha', email: 'a@example.com', role: 'passenger', allowed_modes: ['passenger', 'driver'] };
 const token = () => `h.${btoa(JSON.stringify({ sub: '1', role: 'driver', exp: Math.floor(Date.now() / 1000) + 3600 }))}.s`;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 function Probe() {
   const auth = useAuth();
-  return <><p>{auth.user ? `${auth.user.name}:${auth.user.role}` : 'Signed out'}</p><p>{auth.notice}</p>
+  return <><p>{auth.user ? `${auth.user.name}:${auth.user.role}` : 'Signed out'}</p><p>{auth.notice}</p><p>Mode: {auth.mode ?? "none"}</p>
     <button onClick={() => void auth.login({ email: user.email, password: 'password' }).catch(() => {})}>Login</button>
     <button onClick={auth.logout}>Logout</button>
+    <button onClick={() => auth.selectMode("passenger")}>Passenger Mode</button>
+    <button onClick={() => auth.selectMode("driver")}>Driver Mode</button>
     <button onClick={() => void auth.api.myBookings(0).catch(() => {})}>Fetch</button></>;
 }
 function mount() {
@@ -22,6 +24,61 @@ function mount() {
 }
 
 describe('memory-only verified sessions', () => {
+  it.each(['passenger', 'driver'] as const)('switches a legacy %s account without replacing its token or private cache', async role => {
+    const originalToken = token();
+    const fetcher = vi.fn().mockResolvedValueOnce(json({ access_token: originalToken, token_type: 'bearer' }))
+      .mockResolvedValueOnce(json({ ...user, role })).mockResolvedValueOnce(json([]));
+    vi.stubGlobal('fetch', fetcher);
+    const client = mount();
+    await userEvent.click(screen.getByText('Login'));
+    await screen.findByText(`Ayesha:${role}`);
+    expect(screen.getByText(`Mode: ${role}`)).toBeInTheDocument();
+    client.setQueryData(['my-bookings', user.id], ['booking history']);
+    client.setQueryData(['my-rides', user.id], ['ride history']);
+    for (const mode of ['driver', 'passenger'] as const) {
+      await userEvent.click(screen.getByText(mode === 'driver' ? 'Driver Mode' : 'Passenger Mode'));
+      expect(screen.getByText(`Mode: ${mode}`)).toBeInTheDocument();
+      expect(screen.getByText(`Ayesha:${role}`)).toBeInTheDocument();
+    }
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(client.getQueryData(['my-bookings', user.id])).toEqual(['booking history']);
+    expect(client.getQueryData(['my-rides', user.id])).toEqual(['ride history']);
+    await userEvent.click(screen.getByText('Fetch'));
+    expect(fetcher.mock.calls[2][1].headers.Authorization).toBe(`Bearer ${originalToken}`);
+    await userEvent.click(screen.getByText('Logout'));
+    expect(screen.getByText('Mode: none')).toBeInTheDocument();
+    expect(client.getQueryCache().getAll()).toHaveLength(0);
+    await userEvent.click(screen.getByText('Driver Mode'));
+    expect(screen.getByText('Mode: none')).toBeInTheDocument();
+  });
+
+  it('only accepts modes returned by the verified profile; admin has neither', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(json({ access_token: token(), token_type: 'bearer' }))
+      .mockResolvedValueOnce(json({ ...user, allowed_modes: ['passenger'] }))
+      .mockResolvedValueOnce(json({ access_token: token(), token_type: 'bearer' }))
+      .mockResolvedValueOnce(json({ ...user, role: 'admin', allowed_modes: [] }));
+    vi.stubGlobal('fetch', fetcher);
+    mount();
+    await userEvent.click(screen.getByText('Login'));
+    await screen.findByText('Ayesha:passenger');
+    await userEvent.click(screen.getByText('Driver Mode'));
+    expect(screen.getByText('Mode: passenger')).toBeInTheDocument();
+    await userEvent.click(screen.getByText('Logout'));
+    await userEvent.click(screen.getByText('Login'));
+    await screen.findByText('Ayesha:admin');
+    for (const label of ['Driver Mode', 'Passenger Mode']) await userEvent.click(screen.getByText(label));
+    expect(screen.getByText('Mode: none')).toBeInTheDocument();
+  });
+
+  it.each([undefined, ['admin'], ['driver', 'driver']])('rejects invalid profile capabilities %j', async allowed_modes => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ access_token: token(), token_type: 'bearer' }))
+      .mockResolvedValueOnce(json({ ...user, allowed_modes })));
+    mount();
+    await userEvent.click(screen.getByText('Login'));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(screen.getByText('Signed out')).toBeInTheDocument();
+  });
+
   it('uses /me identity rather than JWT role, then clears cache on logout', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(json({ access_token: token(), token_type: 'bearer' })).mockResolvedValueOnce(json(user));
     vi.stubGlobal('fetch', fetcher);

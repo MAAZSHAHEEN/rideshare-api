@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { dashboardPath, useAuth } from '../auth/AuthProvider';
 import { Icon } from './Icon';
+import { ModeSwitcher } from './ModeSwitcher';
 
 export function Brand() {
   return <Link className="brand" to="/" aria-label="RideShare home"><span className="brand-mark"><Icon name="road" size={25} /></span>Ride<span className="brand-blue">Share</span><span className="brand-dot">.</span></Link>;
 }
 
 export function Layout() {
-  const { user, logout } = useAuth();
+  const { user, logout, mode } = useAuth();
   const [menu, setMenu] = useState(false);
   const location = useLocation();
   useEffect(() => {
@@ -24,10 +25,11 @@ export function Layout() {
       <button className="menu-button" aria-label={menu ? 'Close navigation' : 'Open navigation'} aria-expanded={menu} aria-controls="main-navigation" onClick={() => setMenu(!menu)}><Icon name={menu ? 'close' : 'menu'} /></button>
       <nav id="main-navigation" className={`main-nav ${menu ? 'is-open' : ''}`} aria-label="Main navigation">
         <NavLink to="/" end>Home</NavLink><Link to="/#how-it-works" onClick={() => setMenu(false)}>How it works</Link>
-        {user ? <><NavLink to={dashboardPath(user)}>My dashboard</NavLink><button className="button button-outline small" onClick={logout}>Log out</button></> : <><NavLink to="/login">Log in</NavLink><Link className="button small" to="/register">Get started <Icon name="arrow" size={17} /></Link></>}
+        {user ? <><NavLink to={dashboardPath(user, mode)}>My dashboard</NavLink><button className="button button-outline small" onClick={logout}>Log out</button></> : <><NavLink to="/login">Log in</NavLink><Link className="button small" to="/register">Get started <Icon name="arrow" size={17} /></Link></>}
       </nav>
     </div></header>
+    <ModeSwitcher />
     <main id="main-content" tabIndex={-1}><Outlet /></main>
-    <footer className="site-footer"><div className="container footer-top"><div><Brand /><p>A little company. A better journey.</p></div><div className="footer-links"><Link to="/">Home</Link><Link to="/#how-it-works">How it works</Link><Link to={user ? dashboardPath(user) : '/register'}>{user ? 'My dashboard' : 'Join RideShare'}</Link></div></div><div className="container footer-bottom"><span>© {new Date().getFullYear()} RideShare</span><span>Made for the journeys between.</span></div></footer>
+    <footer className="site-footer"><div className="container footer-top"><div><Brand /><p>A little company. A better journey.</p></div><div className="footer-links"><Link to="/">Home</Link><Link to="/#how-it-works">How it works</Link><Link to={user ? dashboardPath(user, mode) : '/register'}>{user ? 'My dashboard' : 'Join RideShare'}</Link></div></div><div className="container footer-bottom"><span>© {new Date().getFullYear()} RideShare</span><span>Made for the journeys between.</span></div></footer>
   </>;
 }

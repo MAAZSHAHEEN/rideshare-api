@@ -18,7 +18,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Booking, BookingStatus, Ride, RideStatus, User, UserRole
+from models import Booking, BookingStatus, Ride, RideStatus, User
+from permissions import allowed_modes
 from schemas import RideCreate
 
 
@@ -33,7 +34,7 @@ async def list_my_rides(
     db: AsyncSession, current_user: User, *,
     status: RideStatus | None = None, limit: int = 20, offset: int = 0,
 ) -> Sequence[Ride]:
-    if current_user.role != UserRole.driver:
+    if "driver" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only drivers can list their rides")
     query = select(Ride).where(Ride.driver_id == current_user.id)
     if status is not None:
@@ -48,7 +49,7 @@ async def complete_ride(
     db: AsyncSession,
     current_user: User,
 ) -> Ride:
-    if current_user.role != UserRole.driver:
+    if "driver" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only drivers can complete rides")
 
     try:
@@ -88,7 +89,7 @@ async def cancel_ride(
     db: AsyncSession,
     current_user: User,
 ) -> Ride:
-    if current_user.role != UserRole.driver:
+    if "driver" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only drivers can cancel rides")
 
     try:
@@ -133,8 +134,8 @@ async def create_ride(
     current_user: User
 ) -> Ride:
     try:
-        # Only drivers can create rides
-        if current_user.role != UserRole.driver:
+        # Driver capability does not depend on a frontend-selected mode
+        if "driver" not in allowed_modes(current_user.role):
             raise HTTPException(status_code=403, detail="Only drivers can create rides")
 
         departure_time = ride_data.departure_time.astimezone(timezone.utc)

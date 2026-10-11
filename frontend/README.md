@@ -1,7 +1,7 @@
 # RideShare frontend foundation
 
 React + TypeScript + Vite, React Router, TanStack Query and a small typed fetch
-client. All files for this task live in `frontend/`; the backend is unchanged.
+client. The backend exposes account capabilities through its verified profile.
 
 ## Local development
 
@@ -62,13 +62,23 @@ For manual integration, register a real test account against your local backend.
 
 - Landing, responsive navigation/footer, login and registration, separate
   passenger/driver layouts, read-only paginated history, and a read-only account.
-- Registration sends name, email, password, CNIC, phone number and selected role;
-  it redirects to login. No token is assumed from registration.
+- Registration sends name, email, password, CNIC, phone number and initial role;
+  both modes are included. It redirects to login. No token is assumed from registration.
 - Passwords are preserved exactly. New passwords require 12 Unicode characters,
   at most 72 UTF-8 bytes, and cannot consist only of backend-defined whitespace.
   Login allows existing shorter passwords.
 - Login exchanges credentials, then verifies identity using `GET /me`. JWT
   decoding is used only for an expiry timer, never to grant roles.
+- `GET /me` supplies `allowed_modes`; the frontend fails closed if that contract
+  is missing or invalid. Deploy the updated backend first. A passenger or driver
+  account can switch dashboards without signing in again. The switcher changes
+  navigation and in-memory presentation state only: no role update, JWT rewrite
+  or token exchange. Admin accounts have no travel-mode switcher.
+- The initial dashboard follows the legacy registration role when allowed; the
+  current mode is remembered within this session for dashboard/account links.
+  Separate query keys retain ride and booking history when changing modes.
+  Guards respect server capabilities but are not security controls: the backend
+  independently enforces capabilities, ownership, and no self-booking.
 - Tokens exist only in memory. Reloads and new tabs require login. Logout clears
   credentials, aborts sign-in, cancels queries and clears the query cache. An old
   request cannot invalidate a newer session. Logout does not revoke server JWTs.

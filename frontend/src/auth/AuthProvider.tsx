@@ -3,11 +3,13 @@ import type { ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { createApiClient } from '../api/client';
 import type { ApiClient, Credentials } from '../api/client';
-import type { LoginInput, User } from '../api/types';
+import type { AccountMode, LoginInput, User } from '../api/types';
 import { tokenExpiry } from './validation';
 
 interface AuthContextValue {
   user: User | null; api: ApiClient; notice: string;
+  mode: AccountMode | null;
+  selectMode: (mode: AccountMode) => void;
   login: (input: LoginInput) => Promise<User>;
   logout: () => void;
 }
@@ -20,6 +22,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [expiry, setExpiry] = useState<number | null>(null);
   const [notice, setNotice] = useState('');
+  const [mode, setMode] = useState<AccountMode | null>(null);
 
   const endSession = useCallback((message = '') => {
     credentials.current = { token: null, generation: credentials.current.generation + 1 };
@@ -27,6 +30,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void queryClient.cancelQueries();
     queryClient.clear();
     setUser(null);
+    setMode(null);
     setExpiry(null);
     setNotice(message);
   }, [queryClient]);
@@ -47,14 +51,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (typeof result.access_token !== 'string' || typeof result.token_type !== 'string' || result.token_type.toLowerCase() !== 'bearer') throw new Error('The service returned an invalid sign-in response.');
     const identity = await api.me(result.access_token, controller.signal);
     if (!Number.isInteger(identity.id) || identity.id < 1 || typeof identity.name !== 'string' || typeof identity.email !== 'string'
-        || !['passenger', 'driver', 'admin'].includes(identity.role)) throw new Error('The service returned an invalid profile.');
+        || !['passenger', 'driver', 'admin'].includes(identity.role)
+        || !Array.isArray(identity.allowed_modes)
+        || identity.allowed_modes.some(value => !['passenger', 'driver'].includes(value))
+        || new Set(identity.allowed_modes).size !== identity.allowed_modes.length
+        || (identity.role === 'admin' && identity.allowed_modes.length !== 0)) throw new Error('The service returned an invalid profile.');
     const expiresAt = tokenExpiry(result.access_token);
     if (controller.signal.aborted || credentials.current.generation !== generation) throw new DOMException('Sign-in cancelled', 'AbortError');
     credentials.current = { token: result.access_token, generation };
     setUser(identity);
+    setMode(initialMode(identity));
     setExpiry(expiresAt);
     return identity;
   }, [api, endSession]);
+
+  // Presentation state only: no token exchange or account-role mutation.
+  const selectMode = useCallback((next: AccountMode) => {
+    if (user && user.role !== 'admin' && user.allowed_modes.includes(next)) setMode(next);
+  }, [user]);
 
   useEffect(() => {
     if (!expiry) return;
@@ -72,7 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [expiry, endSession]);
   useEffect(() => () => { loginRequest.current?.abort(); }, []);
 
-  return <AuthContext.Provider value={{ user, api, login, logout: () => endSession(), notice }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, api, login, logout: () => endSession(), notice, mode, selectMode }}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {
@@ -80,6 +94,12 @@ export function useAuth() {
   if (!value) throw new Error('AuthProvider is required');
   return value;
 }
-export function dashboardPath(user: User) {
-  return user.role === 'admin' ? '/account' : `/${user.role}`;
+function initialMode(user: User): AccountMode | null {
+  if (user.role === 'admin') return null;
+  return user.allowed_modes.includes(user.role) ? user.role : user.allowed_modes[0] ?? null;
+}
+
+export function dashboardPath(user: User, mode?: AccountMode | null) {
+  const selected = mode && user.allowed_modes.includes(mode) ? mode : initialMode(user);
+  return user.role === 'admin' || !selected ? '/account' : `/${selected}`;
 }

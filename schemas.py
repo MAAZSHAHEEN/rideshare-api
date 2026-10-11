@@ -1,7 +1,8 @@
-from pydantic import AwareDatetime, BaseModel, EmailStr, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, EmailStr, Field, computed_field, field_validator
 from datetime import datetime
 from typing import Literal
 from models import UserRole, RideStatus, BookingStatus
+from permissions import AccountMode, allowed_modes
 
 
 PASSWORD_MAX_BYTES = 72
@@ -33,6 +34,11 @@ class UserResponse(BaseModel):
     name:  str
     email: str
     role:  UserRole
+
+    @computed_field
+    @property
+    def allowed_modes(self) -> list[AccountMode]:
+        return allowed_modes(self.role)
 
 
 class UserLogin(BaseModel):

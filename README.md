@@ -16,11 +16,44 @@ https://rideshare-api.fastapicloud.dev/docs
 
 ## Features
 - User registration and login with JWT
-- Role-based access (passenger, driver, admin)
+- One ordinary account with passenger and driver capabilities; separate admin access
 - Driver creates rides
 - Passenger books rides
 - Driver accepts or rejects bookings
 - Database migrations with Alembic
+
+## Dual-mode accounts
+
+A unique email and CNIC still identify one account. Existing `passenger` and
+`driver` accounts can both create/manage their own rides and request/manage
+bookings on other users' rides. `permissions.py` is the shared server-side
+capability policy. Admin accounts have neither ordinary capability and gain no
+ownership override. Public registration still rejects admin.
+
+`GET /me` and registration return additive `allowed_modes: ["passenger", "driver"]`
+for ordinary accounts, or `[]` for admins. The legacy `role` field and JWT claim
+are retained; registration's role selects the initial dashboard, not exclusive
+permissions. JWT signature, expiration, subject and database-role matching are
+unchanged. There is no mode-switch API or token exchange. A frontend-selected
+mode is presentation state, never authorization evidence. Every private operation
+still checks the authenticated account and resource ownership on the backend.
+Self-booking returns 403 (`You cannot book your own ride`), using the locked,
+refreshed Ride row before inserting a booking.
+
+This is a policy transition, not a data migration: no users, role values, IDs,
+foreign keys, histories, indexes or constraints are rewritten. Alembic head stays
+`d924a6e38f10`. Existing tokens remain valid until their normal expiration.
+The existing uniqueness constraints continue to prevent duplicate email/CNIC.
+Roll out the backend before the new frontend, which requires `allowed_modes`
+from the verified profile. Older clients can continue reading `role` but must
+adopt capabilities to expose both dashboards.
+
+No driver verification is claimed or simulated. If verification becomes required,
+add persisted eligibility with an explicit migration/onboarding policy and enforce
+it in the shared server capability policy and profile response. Do not encode a
+selected dashboard into JWTs to grant driver permissions. Resource ownership,
+Ride -> Booking locks, booking ID lock ordering, transactions and seats are
+unchanged by switching views.
 
 ## API Endpoints
 
@@ -29,7 +62,7 @@ https://rideshare-api.fastapicloud.dev/docs
 - POST /auth/login — login and get JWT token
 
 ### Rides
-- POST /rides/ — create ride (driver only)
+- POST /rides/ — create ride (driver capability, ordinary accounts)
 - GET /rides/ — search rides by origin and destination
 
 Ride creation requires a timezone-aware departure strictly in the future (for
@@ -66,8 +99,8 @@ can block writes while it runs; schedule it appropriately for populated database
 
 `PATCH /rides/{ride_id}/cancel` lets only the owning driver transition an active
 ride to cancelled. It returns the existing ride JSON (200). Missing rides return
-404, completed/already-cancelled rides return 409, and other drivers, passengers,
-or admins receive 403.
+404, completed/already-cancelled rides return 409, and non-owners or admins
+receive 403.
 
 The transaction locks the Ride first, then its pending/accepted bookings ordered
 by booking ID. Those bookings become cancelled; rejected/cancelled history is
@@ -80,8 +113,7 @@ receive new bookings. Concurrent booking actions serialize on the same Ride lock
 
 `PATCH /rides/{ride_id}/complete` lets only the owning driver transition an active
 ride to completed and returns the existing ride JSON (200). Missing rides return
-404; completed/cancelled rides return 409; other drivers, passengers, and admins
-receive 403. There is no reopening or automatic time-based completion.
+404; completed/cancelled rides return 409; non-owners and admins receive 403. There is no reopening or automatic time-based completion.
 
 Completion locks and refreshes the Ride, then locks pending bookings in ID order.
 Pending requests become cancelled, while accepted/rejected/cancelled history is
@@ -91,14 +123,14 @@ failure. Completed rides have zero pending bookings. Completion and cancellation
 serialize on the Ride lock, so exactly one terminal ride transition can win.
 
 ### Bookings
-- POST /bookings/{ride_id} — book a ride (passenger only)
-- PATCH /bookings/{booking_id}/respond — accept or reject booking (driver only)
+- POST /bookings/{ride_id} — book a ride (passenger capability, ordinary accounts)
+- PATCH /bookings/{booking_id}/respond — accept or reject booking (driver capability, ordinary accounts)
 
 `PATCH /bookings/{booking_id}/cancel` lets only the owning passenger cancel a
 pending or accepted booking on an active ride. It returns the existing booking
 JSON with status `cancelled` (200). A pending cancellation does not change seats; an accepted
 cancellation restores exactly one seat in the same transaction. Rejected or
-already-cancelled bookings return 409, another passenger or a non-passenger role
+already-cancelled bookings return 409, another account or an admin
 receives 403, and a missing booking returns 404.
 
 Cancellation and driver decisions serialize using PostgreSQL row locks in
@@ -130,18 +162,18 @@ returns a generic 503 on connection failure without exposing exception text.
 ## Frontend read endpoints
 
 All endpoints below require a bearer token. `GET /me` returns the typed
-`UserResponse` (id, name, email, role); it does not return CNIC or phone number.
+`UserResponse` (id, name, email, role, allowed_modes); it does not return CNIC or phone number.
 
 - `GET /rides/{ride_id}`: any authenticated role can read the existing ride
   response, including departed, sold-out, completed and cancelled rides. Missing
   rides return 404.
-- `GET /rides/me`: drivers only; returns only their own rides, with optional
+- `GET /rides/me`: ordinary accounts in their driver capacity; returns only their own rides, with optional
   `status=active|completed|cancelled`, ordered by departure time DESC, id DESC.
-- `GET /bookings/me`: passengers only; returns only their bookings, each with
+- `GET /bookings/me`: ordinary accounts in their passenger capacity; returns only their bookings, each with
   a nested `ride` containing the existing ride response fields.
 - `GET /rides/{ride_id}/bookings`: owning driver only; each booking includes
   `passenger: {id, name}`. No passenger email, CNIC, phone or password is returned.
-  Other drivers/non-driver roles receive 403; an owning-role lookup of a missing
+  Non-owners/admin accounts receive 403; an eligible account lookup of a missing
   ride receives 404.
 
 Both booking lists order by booking id DESC and accept optional

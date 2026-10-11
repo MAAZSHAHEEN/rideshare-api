@@ -1,6 +1,7 @@
 // Matches the existing FastAPI response models; timestamps stay ISO strings.
 export type Role = 'passenger' | 'driver' | 'admin';
-export interface User { id: number; name: string; email: string; role: Role }
+export type AccountMode = 'passenger' | 'driver';
+export interface User { id: number; name: string; email: string; role: Role; allowed_modes: AccountMode[] }
 export interface Token { access_token: string; token_type: string }
 export interface LoginInput { email: string; password: string }
 export interface RegisterInput extends LoginInput {

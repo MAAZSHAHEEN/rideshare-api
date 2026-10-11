@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 // Browser contract fixtures only: no accounts are created on a real server.
-const identity = { id: 42, name: 'Ayesha Khan', email: 'ayesha@example.com', role: 'passenger' };
+const identity = { id: 42, name: 'Ayesha Khan', email: 'ayesha@example.com', role: 'passenger', allowed_modes: ['passenger', 'driver'] };
 const token = () => `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, role: 'admin' })).toString('base64url')}.signature`;
 async function mockApi(page: Page, role = 'passenger', options: { failMe?: boolean; failList?: boolean; populated?: boolean } = {}) {
   await page.route('http://localhost:8000/**', async route => {
@@ -13,13 +13,13 @@ async function mockApi(page: Page, role = 'passenger', options: { failMe?: boole
     else if (path === '/me') {
       expect(route.request().headers().authorization).toContain('Bearer ');
       status = options.failMe ? 401 : 200;
-      body = options.failMe ? { detail: 'Invalid token' } : { ...identity, role };
+      body = options.failMe ? { detail: 'Invalid token' } : { ...identity, role, allowed_modes: role === 'admin' ? [] : ['passenger', 'driver'] };
     } else if (path === '/auth/register') { status = 201; body = identity; }
     else if (path === '/rides/me' || path === '/bookings/me') {
       expect(route.request().headers().authorization).toContain('Bearer ');
       status = options.failList ? 503 : 200;
       const ride = { id: 7, driver_id: 42, origin: 'Peshawar', destination: 'Islamabad', departure_time: '2030-06-12T09:00:00Z', available_seats: 2, fare_per_seat: 500, status: 'active' };
-      body = options.failList ? { detail: 'Database unavailable' } : options.populated ? (role === 'driver' ? [ride] : [{ id: 10, passenger_id: 42, ride_id: 7, status: 'pending', ride }]) : [];
+      body = options.failList ? { detail: 'Database unavailable' } : options.populated ? (path === '/rides/me' ? [ride] : [{ id: 10, passenger_id: 42, ride_id: 7, status: 'pending', ride }]) : [];
     } else throw new Error(`Unexpected API request: ${path}`);
     await route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify(body) });
   });
@@ -88,8 +88,10 @@ test('passenger identity controls navigation; logout and reload end sessions', a
   await login(page);
   await expect(page).toHaveURL('/passenger');
   await expect(page.getByRole('heading', { name: 'Your journey is just beginning.' })).toBeVisible();
-  // Client-side navigation preserves the memory session and exercises the role guard.
-  await page.evaluate(() => { history.pushState({}, '', '/driver'); dispatchEvent(new PopStateEvent('popstate')); });
+  // A legacy passenger can switch without replacing its verified identity.
+  await page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: 'Driver Mode' }).click();
+  await expect(page).toHaveURL('/driver');
+  await page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: 'Passenger Mode' }).click();
   await expect(page).toHaveURL('/passenger');
   await expect(page.locator('.skip-link')).not.toBeFocused();
   await page.screenshot({ path: testInfo.outputPath('passenger-desktop.png'), fullPage: true });
@@ -149,4 +151,80 @@ test('admin has a verified account page, never passenger or driver privileges', 
   await login(page);
   await expect(page).toHaveURL('/account');
   await expect(page.getByText('This frontend does not provide an admin console.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Travel mode' })).toHaveCount(0);
+  for (const path of ['/driver', '/passenger']) {
+    await page.evaluate(path => { history.pushState({}, '', path); dispatchEvent(new PopStateEvent('popstate')); }, path);
+    await expect(page).toHaveURL('/account');
+  }
+});
+
+for (const role of ['passenger', 'driver']) test(`legacy ${role} switches both dashboards with one session and preserved history`, async ({ page }, testInfo) => {
+  // This multi-page flow also opens a tab and checks both desktop and mobile layouts.
+  test.setTimeout(60_000);
+  await mockApi(page, role, { populated: true });
+  const authHeaders: string[] = [];
+  let loginCalls = 0;
+  let identityCalls = 0;
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname;
+    if (path === '/auth/login') loginCalls++;
+    if (path === '/me') identityCalls++;
+    if (path === '/rides/me' || path === '/bookings/me') authHeaders.push(request.headers().authorization);
+  });
+  await login(page);
+  await expect(page).toHaveURL(`/${role}`);
+  // Modified clicks must not select a mode in this tab. A new tab has no session.
+  const otherMode = role === 'driver' ? 'Passenger Mode' : 'Driver Mode';
+  await page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: otherMode }).click({ modifiers: ['Control'] });
+  await expect(page).toHaveURL(`/${role}`);
+  await expect(page.locator('.mode-switcher .selected')).toHaveText(role === 'driver' ? 'Driver Mode' : 'Passenger Mode');
+  const separateTab = await page.context().newPage();
+  try {
+    await separateTab.goto(role === 'driver' ? '/passenger' : '/driver');
+    await expect(separateTab).toHaveURL('/login');
+  } finally { await separateTab.close(); }
+  for (const mode of ['passenger', 'driver', 'passenger', 'driver']) {
+    const label = mode === 'driver' ? 'Driver Mode' : 'Passenger Mode';
+    await page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: label }).click();
+    await expect(page).toHaveURL(`/${mode}`);
+    await expect(page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: label })).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('.account-badge')).toHaveText(label);
+    await expect(page.getByRole('heading', { name: 'Peshawar to Islamabad' })).toBeVisible();
+    await expect(page.locator('.status-pill')).toHaveText(mode === 'driver' ? 'active' : 'pending');
+  }
+  await page.getByRole('link', { name: 'My account', exact: true }).click();
+  await expect(page.getByText(identity.email)).toBeVisible();
+  await page.getByRole('link', { name: 'Back to dashboard', exact: false }).click();
+  await expect(page).toHaveURL('/driver');
+  expect(loginCalls).toBe(1);
+  expect(identityCalls).toBe(1);
+  expect(authHeaders.length).toBeGreaterThanOrEqual(2);
+  expect(new Set(authHeaders).size).toBe(1);
+  expect(authHeaders[0]).toMatch(/^Bearer /);
+  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
+  await page.screenshot({ path: testInfo.outputPath('dual-mode-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  const passengerLink = page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: 'Passenger Mode' });
+  await passengerLink.focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL('/passenger');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('dual-mode-mobile.png'), fullPage: true });
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Log out' }).click();
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByRole('navigation', { name: 'Travel mode' })).toHaveCount(0);
+});
+
+test('switching to a protected history with an expired session signs out', async ({ page }) => {
+  await mockApi(page);
+  await page.route('http://localhost:8000/rides/me?**', route => route.fulfill({
+    status: 401, contentType: 'application/json', body: '{"detail":"Invalid token"}',
+  }));
+  await login(page);
+  await expect(page).toHaveURL('/passenger');
+  await page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: 'Driver Mode' }).click();
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByRole('status')).toHaveText('Your session has ended. Please sign in again.');
+  await expect(page.getByRole('navigation', { name: 'Travel mode' })).toHaveCount(0);
 });

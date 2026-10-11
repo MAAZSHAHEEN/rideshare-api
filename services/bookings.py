@@ -19,7 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Booking, BookingStatus, Ride, RideStatus, User, UserRole
+from models import Booking, BookingStatus, Ride, RideStatus, User
+from permissions import allowed_modes
 from schemas import DriverBookingResponse, PassengerBookingResponse, PassengerSummary, RideResponse
 
 
@@ -27,7 +28,7 @@ async def list_my_bookings(
     db: AsyncSession, current_user: User, *,
     status: BookingStatus | None = None, limit: int = 20, offset: int = 0,
 ) -> list[PassengerBookingResponse]:
-    if current_user.role != UserRole.passenger:
+    if "passenger" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only passengers can list their bookings")
     query = select(Booking, Ride).join(Ride, Booking.ride_id == Ride.id).where(
         Booking.passenger_id == current_user.id,
@@ -45,7 +46,7 @@ async def list_ride_bookings(
     ride_id: int, db: AsyncSession, current_user: User, *,
     status: BookingStatus | None = None, limit: int = 20, offset: int = 0,
 ) -> list[DriverBookingResponse]:
-    if current_user.role != UserRole.driver:
+    if "driver" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only drivers can list ride bookings")
     driver_id = await db.scalar(select(Ride.driver_id).where(Ride.id == ride_id))
     if driver_id is None:
@@ -70,7 +71,7 @@ async def cancel_booking(
     db: AsyncSession,
     current_user: User,
 ) -> Booking:
-    if current_user.role != UserRole.passenger:
+    if "passenger" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only passengers can cancel bookings")
 
     try:
@@ -121,8 +122,8 @@ async def book_ride(
     current_user: User,
 ) -> Booking:
     try:
-        # Only passengers can book
-        if current_user.role != UserRole.passenger:
+        # Passenger capability comes from the authenticated database account
+        if "passenger" not in allowed_modes(current_user.role):
             raise HTTPException(status_code=403, detail="Only passengers can book rides")
 
         # Lock the ride row for the duration of this transaction to prevent
@@ -135,6 +136,8 @@ async def book_ride(
 
         if not ride:
             raise HTTPException(status_code=404, detail="Ride not found")
+        if ride.driver_id == current_user.id:
+            raise HTTPException(status_code=403, detail="You cannot book your own ride")
         if ride.status != RideStatus.active:
             raise HTTPException(status_code=409, detail="Ride is not active")
         if ride.available_seats < 1:
@@ -183,8 +186,8 @@ async def respond_to_booking(
     current_user: User,
 ) -> Booking:
     try:
-        # Only drivers can respond
-        if current_user.role != UserRole.driver:
+        # Driver capability does not depend on a frontend-selected mode
+        if "driver" not in allowed_modes(current_user.role):
             raise HTTPException(
                 status_code=403, detail="Only drivers can respond to bookings"
             )

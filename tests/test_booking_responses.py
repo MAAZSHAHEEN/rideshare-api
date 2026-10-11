@@ -238,6 +238,20 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
     def assert_one_winner(self, responses):
         self.assertEqual(sorted(response.status_code for response in responses), [200, 409])
 
+    async def test_self_booking_check_refreshes_owner_after_ride_lock_wait(self):
+        self.preload_state = True
+        before = await self.state()
+
+        async def change_owner(connection):
+            await connection.execute(update(Ride).where(Ride.id == self.ride_id).values(
+                driver_id=self.passenger.id,
+            ))
+
+        responses = await self.contended_operations([self.create_booking_request], change_owner)
+        self.assertEqual(responses[0].status_code, 403)
+        self.assertEqual(responses[0].json(), {"detail": "You cannot book your own ride"})
+        self.assertEqual(await self.state(), before)
+
     async def test_same_booking_concurrent_accepts_consume_one_seat(self):
         booking_id = self.booking_ids[0]
         responses = await self.contended_responses([(booking_id, True), (booking_id, True)])
@@ -282,13 +296,14 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json(), {"detail": "This is not your ride"})
         self.assertEqual(await self.state(), before)
 
-    async def test_only_drivers_can_respond(self):
+    async def test_non_owner_and_admin_cannot_respond(self):
         before = await self.state()
         for user in (self.passenger, self.admin):
             with self.subTest(role=user.role):
                 response = await self.respond(self.booking_ids[0], True, user)
                 self.assertEqual(response.status_code, 403, response.text)
-                self.assertEqual(response.json(), {"detail": "Only drivers can respond to bookings"})
+                self.assertEqual(response.json(), {"detail": ("Only drivers can respond to bookings"
+                                                          if user.role == UserRole.admin else "This is not your ride")})
                 self.assertEqual(await self.state(), before)
 
     async def test_missing_booking_returns_404(self):

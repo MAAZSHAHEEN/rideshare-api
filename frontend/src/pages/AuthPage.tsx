@@ -8,7 +8,7 @@ import { Icon } from '../components/Icon';
 
 export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   const registering = mode === 'register';
-  const { api, user, login, notice } = useAuth();
+  const { api, user, login, notice, mode: travelMode } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [role, setRole] = useState<'passenger' | 'driver'>('passenger');
@@ -20,7 +20,7 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   const registrationRequest = useRef<AbortController | null>(null);
   useEffect(() => () => registrationRequest.current?.abort(), []);
   useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
-  if (user) return <Navigate to={dashboardPath(user)} replace />;
+  if (user) return <Navigate to={dashboardPath(user, travelMode)} replace />;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -62,7 +62,7 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
       {error && <div className="notice error" role="alert" tabIndex={-1} ref={errorRef}>{error}</div>}
       <form onSubmit={submit} aria-label={registering ? 'Create account' : 'Log in'}>
         <fieldset disabled={busy} className="form-fields">
-          {registering && <fieldset className="role-fieldset"><legend>I’m joining as a</legend><div className="role-options">{(['passenger', 'driver'] as const).map(option => <label className={`role-option ${role === option ? 'selected' : ''}`} key={option}><input type="radio" name="role" value={option} checked={role === option} onChange={() => setRole(option)} /><Icon name={option === 'driver' ? 'car' : 'user'} size={20} /><span>{option === 'driver' ? 'Driver' : 'Passenger'}</span><span className="radio-dot" /></label>)}</div></fieldset>}
+          {registering && <fieldset className="role-fieldset"><legend>Start my journey as a</legend><div className="role-options">{(['passenger', 'driver'] as const).map(option => <label className={`role-option ${role === option ? 'selected' : ''}`} key={option}><input type="radio" name="role" value={option} checked={role === option} onChange={() => setRole(option)} /><Icon name={option === 'driver' ? 'car' : 'user'} size={20} /><span>{option === 'driver' ? 'Driver' : 'Passenger'}</span><span className="radio-dot" /></label>)}</div><p className="field-help">Both modes are included. Switch any time after signing in.</p></fieldset>}
           {registering && field('name', 'Full name', 'text', 'name', 'Your full name')}
           {field('email', 'Email address', 'email', 'email', 'you@example.com')}
           {registering && <div className="form-row">{field('cnic', 'CNIC', 'text', 'off', 'Your CNIC number')}{field('phone_number', 'Phone number', 'tel', 'tel', 'Your phone number')}</div>}

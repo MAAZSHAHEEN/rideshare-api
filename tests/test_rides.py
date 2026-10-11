@@ -209,7 +209,7 @@ class RideTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.get("/rides/", headers=self.headers(role))
             self.assertEqual(response.status_code, 200, response.text)
             response = await self.client.post("/rides/", json=self.payload(), headers=self.headers(role))
-            self.assertEqual(response.status_code, 201 if role == UserRole.driver else 403, response.text)
+            self.assertEqual(response.status_code, 403 if role == UserRole.admin else 201, response.text)
         for method in ("get", "post"):
             kwargs = {"json": self.payload()} if method == "post" else {}
             response = await getattr(self.client, method)("/rides/", **kwargs)
@@ -217,7 +217,7 @@ class RideTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
             response = await getattr(self.client, method)("/rides/", headers={"Authorization": "Bearer malformed"}, **kwargs)
             self.assertEqual(response.status_code, 401)
-        self.assertEqual(await self.count_rides(), 1)
+        self.assertEqual(await self.count_rides(), 2)
 
 
 if __name__ == "__main__":
