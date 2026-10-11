@@ -24,12 +24,14 @@ export interface Credentials { token: string | null; generation: number }
 export function createApiClient(
   getCredentials: () => Credentials,
   onUnauthorized: (credentials: Credentials) => void,
-  baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
+  baseUrl = import.meta.env.PROD ? '' : (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'),
 ) {
-  const base = baseUrl.replace(/\/+$/, '');
-  const parsed = new URL(base);
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error('VITE_API_BASE_URL must be a public HTTP(S) API URL.');
+  const base = (import.meta.env.PROD ? '' : baseUrl).replace(/\/+$/, '');
+  if (base) {
+    const parsed = new URL(base);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error('VITE_API_BASE_URL must be empty (same origin) or a public HTTP(S) API URL.');
+    }
   }
   async function request<T>(path: string, options: {
     method?: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal; public?: boolean; token?: string;

@@ -13,8 +13,11 @@ npm install
 ```
 
 Copy `.env.example` to `.env.local` if the backend is not at
-`http://localhost:8000`. `VITE_API_BASE_URL` is public build-time configuration,
-not a place for credentials. Restart Vite after changing it.
+`http://localhost:8000`. An empty/unset `VITE_API_BASE_URL` uses that default in
+Vite development; a public HTTP(S) override is supported for development only.
+Production builds always enforce relative, same-origin API requests, ignoring
+shell and local-file API overrides. The variable is public configuration, not a place for credentials.
+Restart Vite after changing it.
 
 Run the existing backend from the repository root with its usual database and
 JWT environment settings. Add this process environment variable (PowerShell):
@@ -93,8 +96,11 @@ For manual integration, register a real test account against your local backend.
 - No ride creation/booking decisions/cancellation UI in this foundation task.
   No fake trips, maps, ratings, payments, social login or admin console.
 
-Production output is `dist/`. Static hosting must fall back to `index.html` for
-client routes. Serve over HTTPS. Google Fonts supplies optional typography;
+Production output is `dist/`. FastAPI serves the explicit client routes and
+hashed assets when this build is present, preserving API JSON errors. See
+[deployment instructions](../DEPLOYMENT.md) for a same-origin build, production
+browser validation and the FastAPI Cloud source-upload procedure. Serve over
+HTTPS. Google Fonts supplies optional typography;
 system fonts remain usable when offline. Travel artwork is a local SVG with no
 external image dependency. Keep API/session values out of analytics and logs.
 

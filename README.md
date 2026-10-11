@@ -201,6 +201,13 @@ query validation, and response models. `services/rides.py` implements creation,
 search, cancellation, and completion with the same explicit session ownership,
 Ride -> Booking(s) lock order, and existing transaction/error behavior.
 
+## Full-stack packaging
+
+The production build can serve React and the existing API from one HTTPS origin.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the multi-stage Docker build, FastAPI Cloud's
+prebuilt-frontend upload requirements, local validation and rollback procedure.
+No deployment or production configuration changes are automated by this task.
+
 ## Local Setup
 
 1. Clone the repo

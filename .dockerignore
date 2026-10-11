@@ -42,3 +42,25 @@ tests
 **/.coverage.*
 **/coverage.xml
 **/htmlcov
+
+# Frontend dependencies/artifacts are rebuilt in the Node stage.
+**/node_modules
+**/.npm-cache
+**/test-results
+**/playwright-report
+**/coverage
+
+# Local databases, dumps, logs and exported review material.
+**/pgdata
+**/postgres_data
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.dump
+**/*.backup
+**/*.log
+**/*.pem
+**/*.key
+task*_*.txt
+frontend-review.txt
+.github

@@ -3,5 +3,7 @@ import { cleanup } from '@testing-library/react';
 import { afterEach, vi } from 'vitest';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
-window.scrollTo = () => {};
-Element.prototype.scrollIntoView = () => {};
+if (typeof window !== 'undefined') {
+  window.scrollTo = () => {};
+  Element.prototype.scrollIntoView = () => {};
+}

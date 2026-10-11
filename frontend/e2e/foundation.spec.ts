@@ -2,10 +2,11 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 // Browser contract fixtures only: no accounts are created on a real server.
+const apiOrigin = process.env.PLAYWRIGHT_API_ORIGIN || 'http://localhost:8000';
 const identity = { id: 42, name: 'Ayesha Khan', email: 'ayesha@example.com', role: 'passenger', allowed_modes: ['passenger', 'driver'] };
 const token = () => `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, role: 'admin' })).toString('base64url')}.signature`;
 async function mockApi(page: Page, role = 'passenger', options: { failMe?: boolean; failList?: boolean; populated?: boolean } = {}) {
-  await page.route('http://localhost:8000/**', async route => {
+  await page.route(url => url.origin === apiOrigin && /^\/(auth\/|me$|rides\/|bookings\/)/.test(url.pathname), async route => {
     const path = new URL(route.request().url()).pathname;
     let body: unknown = {};
     let status = 200;
@@ -74,7 +75,7 @@ test('invalid password fails locally; server validation and conflict are accessi
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page.getByText('Use at least 12 characters.', { exact: true })).toBeVisible();
   await expect(page.getByLabel('Password', { exact: true })).toHaveAttribute('aria-invalid', 'true');
-  await page.route('http://localhost:8000/auth/register', route => route.fulfill({ status: 409, contentType: 'application/json', body: '{"detail":"Registration details already in use"}' }));
+  await page.route(`${apiOrigin}/auth/register`, route => route.fulfill({ status: 409, contentType: 'application/json', body: '{"detail":"Registration details already in use"}' }));
   await page.getByLabel('Password', { exact: true }).fill('A strong password');
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveText('Registration details already in use');
@@ -136,7 +137,7 @@ test('dashboard exposes a loading state until history resolves', async ({ page }
   await mockApi(page);
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  await page.route('http://localhost:8000/bookings/me?**', async route => {
+  await page.route(`${apiOrigin}/bookings/me?**`, async route => {
     await gate;
     await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
   });
@@ -218,7 +219,7 @@ for (const role of ['passenger', 'driver']) test(`legacy ${role} switches both d
 
 test('switching to a protected history with an expired session signs out', async ({ page }) => {
   await mockApi(page);
-  await page.route('http://localhost:8000/rides/me?**', route => route.fulfill({
+  await page.route(`${apiOrigin}/rides/me?**`, route => route.fulfill({
     status: 401, contentType: 'application/json', body: '{"detail":"Invalid token"}',
   }));
   await login(page);

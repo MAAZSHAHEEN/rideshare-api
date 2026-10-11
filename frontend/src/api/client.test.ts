@@ -1,7 +1,50 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApiClient, parseApiError } from './client';
 
 describe('typed API boundary', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('uses relative same-origin URLs by default in production', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_API_BASE_URL', '');
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
+    const api = createApiClient(() => ({ token: 'private', generation: 1 }), vi.fn());
+    await api.me('private');
+    await api.myRides(0);
+    expect(fetch).toHaveBeenNthCalledWith(1, '/me', expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: 'Bearer private' }), credentials: 'omit',
+    }));
+    expect(fetch).toHaveBeenNthCalledWith(2, '/rides/me?limit=20&offset=0', expect.anything());
+  });
+
+  it('supports an explicit same-origin base and an intentional external override', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
+    for (const base of ['', '/', 'https://api.example.com/']) {
+      await createApiClient(() => ({ token: null, generation: 0 }), vi.fn(), base).me('private');
+    }
+    expect(fetch).toHaveBeenNthCalledWith(1, '/me', expect.anything());
+    expect(fetch).toHaveBeenNthCalledWith(2, '/me', expect.anything());
+    expect(fetch).toHaveBeenNthCalledWith(3, 'https://api.example.com/me', expect.anything());
+    for (const base of ['//untrusted.example.com', 'javascript:alert(1)', 'https://user:pass@example.com', 'https://example.com?secret=1']) {
+      expect(() => createApiClient(() => ({ token: null, generation: 0 }), vi.fn(), base)).toThrow();
+    }
+  });
+
+  it.each(['http://localhost:8000', 'https://development.example.com'])('ignores the production API override %s', async base => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_API_BASE_URL', base);
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
+    await createApiClient(() => ({ token: null, generation: 0 }), vi.fn()).me('private');
+    expect(fetch).toHaveBeenCalledWith('/me', expect.anything());
+  });
+
+  it('keeps explicit client overrides on the same origin in production', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
+    await createApiClient(() => ({ token: null, generation: 0 }), vi.fn(), 'https://development.example.com').me('private');
+    expect(fetch).toHaveBeenCalledWith('/me', expect.anything());
+  });
+
   it('uses exact auth payloads, no bearer on login, and preserves passwords', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: 'token', token_type: 'bearer' })));
     vi.stubGlobal('fetch', fetcher);

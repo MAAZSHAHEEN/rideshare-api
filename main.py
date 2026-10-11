@@ -5,6 +5,7 @@ from config import FRONTEND_ORIGINS
 from schemas import UserResponse
 from sqlalchemy import text
 from database import engine
+from frontend_serving import register_frontend
 import models  # noqa: F401 - imported for SQLAlchemy model registration
 from routers import auth
 from routers.dependencies import get_current_user
@@ -33,10 +34,6 @@ app.include_router(bookings.router)
 
 
 
-@app.get("/")
-def root():
-    return{"message": "welcome to ride share api"}
-
 @app.get("/test-db")
 async def test_db():
     try:
@@ -53,3 +50,6 @@ async def get_me(current_user: User = Depends(get_current_user)):
         "email": current_user.email,
         "role": current_user.role
     }
+
+
+register_frontend(app)
