@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI,Depends,HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from validation_errors import request_validation_error_handler
 from config import FRONTEND_ORIGINS
 from schemas import UserResponse
 from sqlalchemy import text
@@ -21,6 +23,7 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
+app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,

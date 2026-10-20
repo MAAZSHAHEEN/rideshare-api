@@ -41,3 +41,4 @@ tests/
 **/playwright-report
 task*_*.txt
 frontend-review.txt
+/.dockerignore
