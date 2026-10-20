@@ -3,7 +3,7 @@ from functools import lru_cache
 import secrets
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from jose import jwt
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +14,7 @@ from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
 from database import get_db
 from models import User, UserRole
 from schemas import PASSWORD_MAX_BYTES, Token, UserCreate, UserLogin, UserResponse
+from auth_rate_limit import check_login_identity
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -95,7 +96,8 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=Token)
-async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
+async def login(user_data: UserLogin, request: Request, db: AsyncSession = Depends(get_db)):
+    await check_login_identity(request, user_data.email)
     result = await db.execute(select(User).where(User.email == user_data.email))
     user = result.scalar_one_or_none()
 

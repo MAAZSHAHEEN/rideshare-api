@@ -19,6 +19,15 @@ jobs:
     timeout-minutes: 20
 
     services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
       postgres:
         image: postgres:15
         env:
@@ -42,6 +51,10 @@ jobs:
       ALGORITHM: HS256
       ACCESS_TOKEN_EXPIRE_MINUTES: "60"
       PYTHONDONTWRITEBYTECODE: "1"
+      # Existing regression suite remains unthrottled; dedicated integration
+      # tests explicitly enable the limiter against this disposable service.
+      AUTH_RATE_LIMIT_ENABLED: "false"
+      TEST_REDIS_URL: redis://127.0.0.1:6379/0
 
     steps:
       - name: Check out repository

@@ -5,6 +5,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from auth_rate_limit import RateLimitSettings
+
+AUTH_RATE_LIMIT_SETTINGS = RateLimitSettings.from_environment()
+
 # Comma-separated exact browser origins. Empty disables cross-origin access.
 FRONTEND_ORIGINS = [value.strip() for value in os.getenv("FRONTEND_ORIGINS", "").split(",")
                     if value.strip()]
@@ -41,3 +45,5 @@ if (
     raise RuntimeError("SECRET_KEY must be a non-placeholder signing key of sufficient length for ALGORITHM")
 if ACCESS_TOKEN_EXPIRE_MINUTES <= 0:
     raise RuntimeError("ACCESS_TOKEN_EXPIRE_MINUTES must be a positive integer")
+if AUTH_RATE_LIMIT_SETTINGS.enabled and AUTH_RATE_LIMIT_SETTINGS.hmac_key == SECRET_KEY:
+    raise RuntimeError("Rate-limit HMAC key must be separate from the JWT signing key")

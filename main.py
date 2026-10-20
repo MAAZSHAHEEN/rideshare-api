@@ -3,7 +3,8 @@ from fastapi import FastAPI,Depends,HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from validation_errors import request_validation_error_handler
-from config import FRONTEND_ORIGINS
+from config import FRONTEND_ORIGINS, AUTH_RATE_LIMIT_SETTINGS
+from auth_rate_limit import AuthRateLimiter, AuthRateLimitMiddleware
 from schemas import UserResponse
 from sqlalchemy import text
 from database import engine
@@ -20,16 +21,22 @@ async def lifespan(app: FastAPI):
     # Alembic owns schema changes; startup only verifies database connectivity.
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
-    yield
+    try:
+        yield
+    finally:
+        await app.state.auth_rate_limiter.close()
 
 app = FastAPI(lifespan=lifespan)
+app.state.auth_rate_limiter = AuthRateLimiter(AUTH_RATE_LIMIT_SETTINGS)
 app.add_exception_handler(RequestValidationError, request_validation_error_handler)
+app.add_middleware(AuthRateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Authorization", "Content-Type"],
+    expose_headers=["Retry-After"],
 )
 app.include_router(auth.router)
 app.include_router(rides.router)

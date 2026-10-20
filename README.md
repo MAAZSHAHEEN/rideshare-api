@@ -285,3 +285,46 @@ upgrade. Set `TEST_DATABASE_URL` to a dedicated PostgreSQL test database and run
 `python -B -m unittest discover -s tests -v`. The migration test additionally
 requires `CREATEDB` permission: it creates and removes its own disposable database
 on that test server, without modifying the configured database's application data.
+
+## Authentication rate limiting (disabled pending proxy verification)
+
+Authentication throttling is opt-in through `AUTH_RATE_LIMIT_ENABLED=true`.
+It is **not activated for FastAPI Cloud**: first verify the platform's ingress
+header sanitization, origin isolation, and Uvicorn trusted-proxy configuration.
+Only then set `AUTH_RATE_LIMIT_CLIENT_IP_SOURCE=verified-asgi`. This setting is
+an operator acknowledgment, not automatic verification. The application uses
+only the ASGI client address and never reads forwarding headers. A misconfigured
+server could group all users behind one proxy or accept spoofed identities.
+
+Set `AUTH_RATE_LIMIT_REDIS_URL` to TLS Redis (`rediss://`), and
+`AUTH_RATE_LIMIT_HMAC_KEY` to a separate random secret of at least 32 bytes.
+Plain Redis is allowed only on loopback for disposable development/tests.
+All replicas must share the Redis database, namespace, HMAC key, and limits.
+Changing a namespace/key resets allowances. Do not log URLs or limiter identifiers.
+
+The defaults are first-attempt fixed windows: 30 login requests per IP per
+60 seconds, 5 registration requests per IP per 600 seconds, and 5 login attempts
+per normalized IP/email pair per 60 seconds. Environment settings in `.env.example`
+configure these separately. Coarse gates run before body validation, so malformed
+requests count. The login pair gate runs before SQL and bcrypt. All attempts count,
+including successful ones; there are no permanent account lockouts.
+
+Redis Lua performs each counter/expiry decision atomically. Denied requests do
+not extend the window. HTTP 429 includes `Retry-After` and `Cache-Control: no-store`.
+Enabled enforcement fails closed with generic HTTP 503 if Redis or the client
+identity is unavailable; other routes remain unaffected. Calls have bounded
+timeouts and no automatic retries. Sensitive identifiers are keyed HMAC digests,
+not raw IPs or emails. CORS remains outside the gate.
+
+Fixed windows allow bursts across window boundaries. Shared networks can share
+quotas, distributed attackers can change IPs, and Redis eviction/failover can
+reset counters. Use adequate capacity and a suitable eviction policy; this is
+abuse throttling, not a durable quota ledger. Free-tier exhaustion/outages can
+prevent login while enforcement is enabled. No services are provisioned here.
+
+For tests, use disposable loopback PostgreSQL (`TEST_DATABASE_URL`) and Redis
+(`TEST_REDIS_URL`, for example `redis://127.0.0.1:6379/0`). Keep
+`AUTH_RATE_LIMIT_ENABLED=false` for the original regression suite; new integration
+tests explicitly enable isolated limiter instances and unique key namespaces.
+Run `python -B -m unittest discover -s tests -v`. CI supplies both services.
+Never supply production service URLs. The tests clean only their own namespaces.
