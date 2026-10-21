@@ -1,18 +1,56 @@
 # RideShare API
 
-A production-ready ride-sharing backend for intercity commuters in Khyber Pakhtunkhwa, Pakistan.
+[![CI](https://github.com/MAAZSHAHEEN/rideshare-api/actions/workflows/ci.yml/badge.svg?branch=rideshare-v2)](https://github.com/MAAZSHAHEEN/rideshare-api/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Built with FastAPI, PostgreSQL, and deployed on AWS.
+An open-source ride-sharing backend for intercity commuters in Khyber Pakhtunkhwa, Pakistan.
+Drivers publish seats on intercity trips, passengers search and request them, and drivers
+accept, decline, complete or cancel. Built with FastAPI, async SQLAlchemy and PostgreSQL,
+with a React frontend served from the same origin.
 
-## Live API
-https://rideshare-api.fastapicloud.dev/docs
+**Project status:** early-stage and solo-maintained. Active development happens on the
+`rideshare-v2` branch, which is not yet merged into `main`. Contributions and issue
+reports are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Live demo
+- App: https://rideshare-api.fastapicloud.dev/
+- Interactive API docs: https://rideshare-api.fastapicloud.dev/docs
 
 ## Tech Stack
-- FastAPI
-- PostgreSQL + SQLAlchemy (async)
-- JWT Authentication
-- Alembic (database migrations)
-- Deployed on AWS EC2 with Nginx
+- FastAPI + Pydantic v2
+- PostgreSQL + SQLAlchemy 2 (async, asyncpg)
+- Alembic (authoritative schema migrations)
+- JWT authentication (HS256/384/512, enforced minimum key length)
+- Optional Redis-backed authentication rate limiting
+- React 19 + Vite + TanStack Query frontend
+- Docker, Docker Compose, GitHub Actions CI
+- Live demo hosted on FastAPI Cloud
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Browser[React frontend] -->|same-origin HTTPS, JWT bearer| API[FastAPI app main.py]
+    API --> Routers[routers/ auth, rides, bookings]
+    Routers --> Perms[permissions.py capability policy]
+    Routers --> Services[services/ ride + booking logic]
+    Services -->|row locks, transactions| DB[(PostgreSQL)]
+    API -.optional.-> Redis[(Redis rate limiter)]
+    Alembic[alembic/ migrations] --> DB
+```
+
+| Path | Responsibility |
+|---|---|
+| `main.py` | App factory, routers, CORS, frontend serving |
+| `config.py` | Environment configuration and startup validation |
+| `routers/` | HTTP endpoints for auth, rides and bookings |
+| `services/` | Ride and booking business rules, locking and transactions |
+| `permissions.py` | Server-side passenger/driver/admin capability policy |
+| `models.py`, `schemas.py` | SQLAlchemy models and Pydantic schemas |
+| `alembic/` | Database migrations (source of truth for the schema) |
+| `auth_rate_limit.py` | Optional Redis-backed login/register throttling |
+| `frontend/` | React client (see `frontend/README.md`) |
+| `tests/` | PostgreSQL integration test suite (`unittest`) |
 
 ## Features
 - User registration and login with JWT
@@ -210,27 +248,33 @@ No deployment or production configuration changes are automated by this task.
 
 ## Local Setup
 
-1. Clone the repo
-   git clone https://github.com/MAAZSHAHEEN/rideshare-api.git
+Requirements: Python 3.11+, PostgreSQL 15+ (or Docker), and optionally Node 22.12+ for the frontend.
 
-2. Create virtual environment
-   python -m venv venv
-   venv\Scripts\activate
+```sh
+git clone https://github.com/MAAZSHAHEEN/rideshare-api.git
+cd rideshare-api
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env            # then edit the values
+```
 
-3. Install dependencies
-   pip install -r requirements.txt
+`SECRET_KEY` must be a random value of at least 32 bytes for HS256; placeholder values are
+rejected at startup. One way to generate one:
 
-4. Create .env file
-   DATABASE_URL=postgresql+asyncpg://postgres:yourpassword@localhost:5432/rideshare
-   SECRET_KEY=yoursecretkey
-   ALGORITHM=HS256
-   ACCESS_TOKEN_EXPIRE_MINUTES=60
+```sh
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
 
-5. Run migrations
-   alembic upgrade head
+Start PostgreSQL (Docker Compose exposes it on `localhost:5433`), apply migrations and run the API:
 
-6. Start server
-   uvicorn main:app --reload
+```sh
+docker compose up -d db
+alembic upgrade head
+uvicorn main:app --reload
+```
+
+Open http://127.0.0.1:8000/docs for the interactive API docs.
 
 ## CI and testing
 
@@ -328,3 +372,16 @@ For tests, use disposable loopback PostgreSQL (`TEST_DATABASE_URL`) and Redis
 tests explicitly enable isolated limiter instances and unique key namespaces.
 Run `python -B -m unittest discover -s tests -v`. CI supplies both services.
 Never supply production service URLs. The tests clean only their own namespaces.
+
+## Contributing
+
+Bug reports, documentation fixes and pull requests are welcome. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) for setup, test and pull request guidelines.
+
+## Security
+
+Please do not report vulnerabilities in public issues. See [SECURITY.md](SECURITY.md).
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Maaz Shaheen.
