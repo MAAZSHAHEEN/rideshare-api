@@ -8,9 +8,19 @@ from permissions import AccountMode, allowed_modes
 PASSWORD_MAX_BYTES = 72
 
 
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
 def normalize_email(value: str) -> str:
-    """Email identity is case-insensitive: store and compare trimmed lowercase."""
-    return value.strip().lower()
+    """Trim and lowercase ASCII letters only.
+
+    Case-insensitive identity itself is PostgreSQL lower(), used by both the login
+    lookup and uq_users_email_lower. Python's str.lower() applies full Unicode case
+    mapping and can disagree with PostgreSQL (e.g. U+0130 'İ' becomes 'i' + U+0307
+    in Python but 'i' in PostgreSQL), which would lock out legacy accounts and let
+    case twins register. ASCII-only folding is identical in both, so it is safe.
+    """
+    return value.strip().translate(_ASCII_LOWER)
 
 
 def normalize_email_input(value):

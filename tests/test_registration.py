@@ -221,6 +221,35 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
             "/auth/register", json={**self.payload("passenger"), "email": legacy.upper()})
         self.assertEqual(response.status_code, 409)
 
+    async def test_non_ascii_case_folding_matches_postgresql(self):
+        # Python's full case mapping of U+0130 differs from PostgreSQL lower();
+        # identity must follow PostgreSQL for both legacy and new rows.
+        payload, created = await self.register_user()
+        domain = payload["email"].split("@", 1)[1]
+        legacy = f"\u0130stanbul.Stra\u1e9ee@{domain}"
+        await self.connection.execute(
+            update(User).where(User.id == created["id"]).values(email=legacy))
+        for variant in (legacy, f"  {legacy} ", legacy.upper()):
+            with self.subTest(login=variant):
+                response = await self.login_user({**payload, "email": variant})
+                self.assertEqual(response.status_code, 200, response.text)
+        for variant in (legacy, legacy.upper(), f"\u0130STANBUL.STRASSE@{domain}".replace("SS", "\u1e9e")):
+            with self.subTest(register=variant):
+                response = await self.client.post(
+                    "/auth/register", json={**self.payload("passenger"), "email": variant})
+                self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(await self.connection.scalar(select(func.count()).select_from(User)), 1)
+
+    async def test_registration_preserves_non_ascii_letters_and_folds_ascii(self):
+        payload = {**self.payload("passenger")}
+        local, domain = payload["email"].split("@", 1)
+        payload["email"] = f" \u0130Z.{local.upper()}@{domain.upper()} "
+        response = await self.client.post("/auth/register", json=payload)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["email"], f"\u0130z.{local.lower()}@{domain.lower()}")
+        response = await self.login_user({**payload, "email": f"\u0130Z.{local}@{domain}"})
+        self.assertEqual(response.status_code, 200, response.text)
+
     async def test_database_probe_failure_returns_generic_503(self):
         with patch("main.engine") as engine:
             engine.connect.side_effect = RuntimeError("private diagnostic must not escape")
