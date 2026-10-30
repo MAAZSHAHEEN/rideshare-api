@@ -7,7 +7,7 @@ import secrets
 import unittest
 from unittest.mock import patch
 
-from jose import jwt
+import jwt
 
 
 with patch.dict(os.environ, {

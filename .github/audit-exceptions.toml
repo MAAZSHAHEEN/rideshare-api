@@ -1,0 +1,23 @@
+# Justified dependency-audit exceptions (AST-008).
+# Read by .github/scripts/audit_gate.py in the "Dependency audit" CI job.
+#
+# Every entry needs: id (the advisory id the tool reports: PYSEC-/GHSA-/CVE- for
+# pip-audit, the GHSA id for npm), package, reason (why it is not reachable or
+# cannot be fixed yet, and what would change that) and review_by (YYYY-MM-DD).
+# An entry past review_by fails CI, so exceptions cannot quietly become permanent.
+# Full triage: docs/security/DEPENDENCY_AUDIT_2026-10-31.md
+#
+# Example (do not uncomment without a real justification):
+# [[pip]]
+# id = "PYSEC-0000-0000"
+# package = "example"
+# reason = "Vulnerable function example.parse() is never called; no fixed release yet."
+# review_by = 2026-12-01
+#
+# [[npm]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# package = "example"
+# reason = "Dev-only build tool; not shipped in dist/."
+# review_by = 2026-12-01
+
+# No active exceptions as of 2026-10-31: the audited tree has zero known advisories.
