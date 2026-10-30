@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI,Depends,HTTPException
+from fastapi import FastAPI,Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from validation_errors import request_validation_error_handler
@@ -9,6 +9,7 @@ from schemas import UserResponse
 from sqlalchemy import text
 from database import engine
 from frontend_serving import register_frontend
+import health
 import models  # noqa: F401 - imported for SQLAlchemy model registration
 from routers import auth
 from routers.dependencies import get_current_user
@@ -41,16 +42,8 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(rides.router)
 app.include_router(bookings.router)
-
-
-
-@app.get("/test-db")
-async def test_db():
-    try:
-        async with engine.connect() as conn:
-            return {"status": "Database connected!"}
-    except Exception:
-        raise HTTPException(status_code=503, detail="Database unavailable") from None
+# Liveness/readiness probes; the old /test-db diagnostic was retired (AST-010).
+app.include_router(health.router)
 
 @app.get("/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
