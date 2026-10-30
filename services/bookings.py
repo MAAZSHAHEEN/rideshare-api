@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import clock
 from models import Booking, BookingStatus, Ride, RideStatus, User
 from permissions import allowed_modes
 from schemas import DriverBookingResponse, PassengerBookingResponse, PassengerSummary, RideResponse
@@ -140,6 +141,10 @@ async def book_ride(
             raise HTTPException(status_code=403, detail="You cannot book your own ride")
         if ride.status != RideStatus.active:
             raise HTTPException(status_code=409, detail="Ride is not active")
+        # Evaluated after the row lock so a request that waited on a concurrent
+        # transaction is judged against the time it actually proceeds.
+        if clock.has_departed(ride.departure_time):
+            raise HTTPException(status_code=409, detail="Ride has already departed")
         if ride.available_seats < 1:
             raise HTTPException(status_code=409, detail="No seats available")
 
@@ -232,6 +237,10 @@ async def respond_to_booking(
             raise HTTPException(status_code=409, detail="Ride is not active")
 
         if accept:
+            # Rejection stays allowed after departure so drivers can clear
+            # stale requests; acceptance would commit a seat on a departed ride.
+            if clock.has_departed(ride.departure_time):
+                raise HTTPException(status_code=409, detail="Ride has already departed")
             if ride.available_seats < 1:
                 raise HTTPException(status_code=409, detail="No seats available")
             booking.status = BookingStatus.accepted
