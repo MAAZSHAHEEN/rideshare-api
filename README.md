@@ -210,27 +210,56 @@ No deployment or production configuration changes are automated by this task.
 
 ## Local Setup
 
-1. Clone the repo
-   git clone https://github.com/MAAZSHAHEEN/rideshare-api.git
+Requirements: Python 3.11+, PostgreSQL 15+ (or Docker), Redis 7 only for the
+rate-limit tests, and Node 22.12+ for the frontend.
 
-2. Create virtual environment
-   python -m venv venv
-   venv\Scripts\activate
+```sh
+git clone https://github.com/MAAZSHAHEEN/rideshare-api.git
+cd rideshare-api
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env            # then edit the values; .env is git-ignored
+```
 
-3. Install dependencies
-   pip install -r requirements.txt
+`SECRET_KEY` must be a random value of at least 32 bytes for HS256; placeholder
+values are rejected at startup. Generate one with:
 
-4. Create .env file
-   DATABASE_URL=postgresql+asyncpg://postgres:yourpassword@localhost:5432/rideshare
-   SECRET_KEY=yoursecretkey
-   ALGORITHM=HS256
-   ACCESS_TOKEN_EXPIRE_MINUTES=60
+```sh
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
 
-5. Run migrations
-   alembic upgrade head
+Start PostgreSQL (Docker Compose exposes it on `localhost:5433`, matching
+`.env.example`), apply migrations and run the API:
 
-6. Start server
-   uvicorn main:app --reload
+```sh
+docker compose up -d db
+alembic upgrade head
+uvicorn main:app --reload
+```
+
+Open http://127.0.0.1:8000/docs for the interactive API docs. For the frontend
+dev server: `cd frontend && npm ci && npm run dev` (it calls
+`http://localhost:8000` by default; keep `FRONTEND_ORIGINS` set to the Vite
+origin). To run the backend tests, point `TEST_DATABASE_URL` at a disposable
+database and `TEST_REDIS_URL` at a loopback Redis (see "CI and testing").
+
+Every environment variable the code reads, with defaults and which are secrets,
+is listed in [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md). Never point local
+commands or tests at the production database.
+
+## Operations
+
+Runbooks and checklists (no deployment is automated):
+[production config](docs/operations/PRODUCTION_CONFIG_CHECKLIST.md) ·
+[smoke tests](docs/operations/SMOKE_TESTS.md) ·
+[backup and restore](docs/operations/BACKUP_RESTORE.md) ·
+[migration rehearsal](docs/operations/MIGRATION_REHEARSAL.md) ·
+[rollback](docs/operations/ROLLBACK.md) ·
+[logging and monitoring](docs/operations/LOGGING_MONITORING.md) ·
+[security headers](docs/operations/SECURITY_HEADERS_CHECKLIST.md) ·
+[Redis rate-limit prerequisites](docs/operations/REDIS_RATE_LIMIT_PREREQUISITES.md) ·
+[incident response](docs/operations/INCIDENT_RESPONSE.md).
 
 ## CI and testing
 
