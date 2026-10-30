@@ -5,7 +5,7 @@ import secrets
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request
 from jose import jwt
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -63,9 +63,13 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     if result.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Registration details already in use")
 
-    # Check duplicate CNIC
-    result = await db.execute(select(User).where(User.cnic == user_data.cnic))
-    if result.scalar_one_or_none():
+    # Check duplicate CNIC. user_data.cnic is canonical (13 digits), but rows created
+    # before AST-007 were stored verbatim (e.g. 12345-1234567-1), so compare digits.
+    # Not index-backed; acceptable at MVP scale, see docs/privacy/CNIC_PHONE_PROTECTION.md.
+    result = await db.execute(select(User.id).where(
+        func.regexp_replace(User.cnic, "[^0-9]", "", "g") == user_data.cnic,
+    ).limit(1))
+    if result.scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="Registration details already in use")
 
     new_user = User(

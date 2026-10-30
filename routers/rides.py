@@ -5,7 +5,7 @@ from pydantic import AwareDatetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models import BookingStatus, RideStatus, User
-from schemas import DriverBookingResponse, RideCreate, RideResponse
+from schemas import PLACE_MAX_LENGTH, DriverBookingResponse, RideCreate, RideResponse
 from routers.dependencies import get_current_user
 from services import rides as ride_service
 from services import bookings as booking_service
@@ -90,8 +90,8 @@ async def create_ride(
 
 @router.get("/", response_model=list[RideResponse])
 async def search_rides(
-    origin: Annotated[str | None, Query(min_length=1)] = None,
-    destination: Annotated[str | None, Query(min_length=1)] = None,
+    origin: Annotated[str | None, Query(min_length=1, max_length=PLACE_MAX_LENGTH)] = None,
+    destination: Annotated[str | None, Query(min_length=1, max_length=PLACE_MAX_LENGTH)] = None,
     departure_from: Annotated[AwareDatetime | None, Query()] = None,
     departure_before: Annotated[AwareDatetime | None, Query()] = None,
     min_seats: Annotated[int, Query(ge=1, le=2**31 - 1)] = 1,

@@ -71,8 +71,9 @@ class TransactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     def registration(self):
         key = uuid4().hex
-        return dict(name="Test", email=f"{key}@example.com", cnic=key,
-                    phone_number="000", password="Valid-password-123!", role="passenger")
+        # Obviously fake 13-digit CNIC (canonical form, so stored == submitted).
+        return dict(name="Test", email=f"{key}@example.com", cnic=f"{int(key, 16) % 10**13:013d}",
+                    phone_number="+923000000000", password="Valid-password-123!", role="passenger")
 
     async def seed(self):
         async with AsyncSession(self.engine, expire_on_commit=False) as db:
