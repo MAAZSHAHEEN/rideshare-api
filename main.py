@@ -3,8 +3,9 @@ from fastapi import FastAPI,Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from validation_errors import request_validation_error_handler
-from config import FRONTEND_ORIGINS, AUTH_RATE_LIMIT_SETTINGS
+from config import FRONTEND_ORIGINS, AUTH_RATE_LIMIT_SETTINGS, MAX_REQUEST_BODY_BYTES
 from auth_rate_limit import AuthRateLimiter, AuthRateLimitMiddleware
+from http_safety import RequestBodyLimitMiddleware, RequestIdMiddleware, SafeErrorMiddleware
 from schemas import UserResponse
 from sqlalchemy import text
 from database import engine
@@ -30,15 +31,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.state.auth_rate_limiter = AuthRateLimiter(AUTH_RATE_LIMIT_SETTINGS)
 app.add_exception_handler(RequestValidationError, request_validation_error_handler)
+# Middleware added first runs innermost. The inner SafeErrorMiddleware turns route
+# exceptions into a generic 500 that CORS still decorates; the outer one covers
+# the middleware layers. Neither re-raises, so Uvicorn never logs the traceback.
+app.add_middleware(SafeErrorMiddleware)
 app.add_middleware(AuthRateLimitMiddleware)
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Authorization", "Content-Type"],
-    expose_headers=["Retry-After"],
+    expose_headers=["Retry-After", "X-Request-ID"],
 )
+app.add_middleware(SafeErrorMiddleware)
+app.add_middleware(RequestIdMiddleware)
 app.include_router(auth.router)
 app.include_router(rides.router)
 app.include_router(bookings.router)

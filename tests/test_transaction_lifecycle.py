@@ -4,6 +4,7 @@ Use the production get_db generator with its existing factory bound to an
 isolated schema. No dependency override or production database is used.
 """
 import asyncio
+import json
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -159,6 +160,23 @@ class TransactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_direct_postgresql_failure_rolls_back_and_propagates(self):
         await self.check_failed_writes(True)
 
+    async def assert_internal_error(self, request, exc_type, message=None, *,
+                                    sqlstate=None, constraint=None):
+        # Unhandled errors become a generic 500; the log carries only safe fields.
+        with self.assertLogs("rideshare.errors", "ERROR") as logs:
+            response = await request
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertEqual(response.json(), {"detail": "Internal server error"})
+        self.assertEqual(len(logs.records), 1)
+        record = json.loads(logs.records[0].getMessage())
+        self.assertEqual(record["exc_type"], exc_type)
+        self.assertEqual(record.get("sqlstate"), sqlstate)
+        self.assertEqual(record.get("constraint"), constraint)
+        self.assertIsNone(logs.records[0].exc_info)
+        if message:
+            self.assertNotIn(message, logs.output[0])
+        return response
+
     async def test_real_get_db_closes_after_http_failure(self):
         ride_id, booking_id = await self.seed()
         before = await self.snapshot()
@@ -169,9 +187,10 @@ class TransactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("HTTP failure after flush")
         token = create_access_token(self.driver.id, self.driver.role)
         with patch.object(AsyncSession, "commit", fail_commit):
-            with self.assertRaisesRegex(RuntimeError, "HTTP failure"):
-                await self.client.post("/rides/", json=self.payload(),
-                                       headers={"Authorization": f"Bearer {token}"})
+            await self.assert_internal_error(
+                self.client.post("/rides/", json=self.payload(),
+                                 headers={"Authorization": f"Bearer {token}"}),
+                "builtins.RuntimeError", "HTTP failure")
         self.assertEqual(len(sessions), 1)
         self.assertFalse(sessions[0].in_transaction())
         self.assertEqual(self.engine.pool.checkedout(), 0)
@@ -238,10 +257,9 @@ class TransactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await original_rollback(db)
             rollbacks.append(db)
         with patch.object(AsyncSession, "commit", invalid_commit), patch.object(AsyncSession, "rollback", record_rollback):
-            with self.assertRaises(IntegrityError) as raised:
-                await self.client.post("/auth/register", json=self.registration())
-        self.assertEqual(raised.exception.orig.sqlstate, "23505")
-        self.assertEqual(raised.exception.orig.__cause__.constraint_name, "users_pkey")
+            await self.assert_internal_error(
+                self.client.post("/auth/register", json=self.registration()),
+                "sqlalchemy.exc.IntegrityError", sqlstate="23505", constraint="users_pkey")
         self.assertEqual(len(rollbacks), 1)
         self.assertEqual((await self.snapshot())[2], 4)
 
@@ -281,8 +299,9 @@ class TransactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     method, path, kwargs = "post", "/auth/register", {"json": self.registration()}
                 kwargs["headers"] = {"Authorization": f"Bearer {create_access_token(actor.id, actor.role)}"}
                 with patch.object(AsyncSession, "refresh", fail_refresh), patch.object(AsyncSession, "rollback", record_rollback):
-                    with self.assertRaisesRegex(RuntimeError, "refresh failed"):
-                        await getattr(self.client, method)(path, **kwargs)
+                    await self.assert_internal_error(
+                        getattr(self.client, method)(path, **kwargs),
+                        "builtins.RuntimeError", "refresh failed")
                 self.assertEqual(len(observed), 1)
                 self.assertEqual(len(rollbacks), 1)  # Only the deliberately rolled-back refresh transaction.
                 after_rides, after_bookings, after_users = persisted[0]

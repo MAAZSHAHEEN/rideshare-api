@@ -47,3 +47,12 @@ if ACCESS_TOKEN_EXPIRE_MINUTES <= 0:
     raise RuntimeError("ACCESS_TOKEN_EXPIRE_MINUTES must be a positive integer")
 if AUTH_RATE_LIMIT_SETTINGS.enabled and AUTH_RATE_LIMIT_SETTINGS.hmac_key == SECRET_KEY:
     raise RuntimeError("Rate-limit HMAC key must be separate from the JWT signing key")
+
+# Largest accepted request body in bytes (default 64 KiB; API payloads are small JSON).
+_MAX_BODY_BOUNDS = (1024, 10 * 1024 * 1024)
+_max_body_raw = os.getenv("MAX_REQUEST_BODY_BYTES", "65536").strip()
+if not _max_body_raw.isascii() or not _max_body_raw.isdigit():
+    raise RuntimeError("MAX_REQUEST_BODY_BYTES must be an integer between 1024 and 10485760")
+MAX_REQUEST_BODY_BYTES = int(_max_body_raw)
+if not _MAX_BODY_BOUNDS[0] <= MAX_REQUEST_BODY_BYTES <= _MAX_BODY_BOUNDS[1]:
+    raise RuntimeError("MAX_REQUEST_BODY_BYTES must be an integer between 1024 and 10485760")
