@@ -56,10 +56,30 @@ $env:PLAYWRIGHT_CHANNEL = 'chrome'
 npm run test:e2e
 ```
 
-Browser tests start Vite at port 5183 and intercept API calls using contract
-fixtures. They do not create real accounts and are not a replacement for the
-backend PostgreSQL suite. Screenshots are saved under ignored `test-results/`.
-For manual integration, register a real test account against your local backend.
+Browser tests start Vite at port 5183 (override with `PLAYWRIGHT_DEV_PORT`) and
+intercept API calls using contract fixtures. Third-party requests (for example
+Google Fonts) are blocked so runs are offline and deterministic. They do not
+create real accounts and are not a replacement for the backend PostgreSQL suite.
+Screenshots are saved under ignored `test-results/`.
+
+- `e2e/foundation.spec.ts`, `e2e/smoke.spec.ts`: routes, navigation, login and
+  registration, 401/409/422/5xx/network failure states, 390x844 mobile layout.
+- `e2e/a11y.spec.ts`: axe-core WCAG A/AA scan of key pages; serious and critical
+  violations fail, every finding is attached to the report.
+- `e2e/live-backend.spec.ts`: opt-in contract check against a local FastAPI
+  serving `dist/` on a disposable database. Skipped unless enabled:
+
+```sh
+npm run build    # then, from the repo root, with a disposable DATABASE_URL:
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:8000 PLAYWRIGHT_API_ORIGIN=http://127.0.0.1:8000 \
+  E2E_LIVE_BACKEND=1 npm run test:e2e
+```
+
+CI runs this exact mode (job `e2e` in `.github/workflows/ci.yml`). Use a system
+Chromium with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium` where the
+Playwright download is unavailable (for example linux-arm64). Never point
+`PLAYWRIGHT_BASE_URL` at a deployed environment.
 
 ## Scope and session policy
 
