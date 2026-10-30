@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ command }) => ({
   plugins: [react()],
+  // Never inline fonts as data: URLs; the CSP allows same-origin fonts only.
+  build: { assetsInlineLimit: (file: string) => (file.endsWith('.woff2') || file.endsWith('.woff') ? false : undefined) },
   // Build artifacts always target the backend that serves them. This overrides
   // shell/.env values even when a build uses a custom mode or NODE_ENV.
   define: command === 'build' ? { 'import.meta.env.VITE_API_BASE_URL': JSON.stringify('/') } : undefined,

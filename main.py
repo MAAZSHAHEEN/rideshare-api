@@ -9,6 +9,7 @@ from schemas import UserResponse
 from sqlalchemy import text
 from database import engine
 from frontend_serving import register_frontend
+from security_headers import SecurityHeadersMiddleware
 import models  # noqa: F401 - imported for SQLAlchemy model registration
 from routers import auth
 from routers.dependencies import get_current_user
@@ -38,6 +39,8 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
     expose_headers=["Retry-After"],
 )
+# Added last so it is outermost and also covers CORS and rate-limit responses.
+app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(auth.router)
 app.include_router(rides.router)
 app.include_router(bookings.router)

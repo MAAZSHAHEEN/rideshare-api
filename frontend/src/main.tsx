@@ -4,6 +4,9 @@ import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from './App';
 import { AuthProvider } from './auth/AuthProvider';
+
+// Self-hosted fonts keep the CSP same-origin (no Google Fonts requests).
+import './fonts.css';
 import './styles.css';
 
 const queryClient = new QueryClient({ defaultOptions: {
