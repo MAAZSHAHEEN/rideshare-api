@@ -27,3 +27,12 @@ export interface RideSearch {
   minSeats?: number; limit?: number; offset?: number;
 }
 export interface Booking { id: number; ride_id: number; passenger_id: number; status: BookingStatus }
+
+/** POST /rides/ body. departure_time is ISO-8601 with an explicit offset (+05:00 from the driver UI). */
+export interface RideCreateInput {
+  origin: string; destination: string; departure_time: string; available_seats: number; fare_per_seat: number;
+}
+/** GET /rides/{id}/bookings item: the server projects only the passenger's id and name (no contact data). */
+export interface DriverBooking {
+  id: number; ride_id: number; passenger_id: number; status: BookingStatus; passenger: { id: number; name: string };
+}

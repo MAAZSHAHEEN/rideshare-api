@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest';
 // AST-004: WCAG 2.1 AA text contrast for the stylesheet, and no unearned
 // "verified" claims in user-facing copy (the backend verifies nothing yet).
 
-// Every stylesheet the app imports is checked (passenger.css: AST-023).
-const css = ['styles.css', 'passenger.css'].map((name) => readFileSync(join(__dirname, name), 'utf8')).join('\n');
+// Every stylesheet the app imports is checked (passenger.css: AST-023, driver.css: M3).
+const css = ['styles.css', 'passenger.css', 'driver.css'].map((name) => readFileSync(join(__dirname, name), 'utf8')).join('\n');
 
 const vars = Object.fromEntries(
   [...css.matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{3,6})/g)].map(([, name, value]) => [name, value]),
@@ -85,8 +85,15 @@ describe('stylesheet text contrast (WCAG AA)', () => {
 
 describe('user-facing copy', () => {
   it('makes no verification claims the backend does not back', () => {
-    for (const dir of [join(__dirname, 'pages'), join(__dirname, 'pages', 'passenger')]) for (const file of readdirSync(dir).filter((name) => name.endsWith('.tsx'))) {
+    for (const dir of [join(__dirname, 'pages'), join(__dirname, 'pages', 'passenger'), join(__dirname, 'pages', 'driver')]) for (const file of readdirSync(dir).filter((name) => name.endsWith('.tsx') && !name.endsWith('.test.tsx'))) {
       expect(readFileSync(join(dir, file), 'utf8'), file).not.toMatch(/verified by|verified (driver|account|user)s?/i);
+    }
+  });
+  it('labels driver identity honestly: documents are not verified (M3)', () => {
+    const dashboard = readFileSync(join(__dirname, 'pages', 'Dashboard.tsx'), 'utf8');
+    expect(dashboard).toContain('Driver documents not verified');
+    for (const file of readdirSync(join(__dirname, 'pages', 'driver')).filter((name) => name.endsWith('.tsx') && !name.endsWith('.test.tsx'))) {
+      expect(readFileSync(join(__dirname, 'pages', 'driver', file), 'utf8'), file).not.toMatch(/verified/i);
     }
   });
 });

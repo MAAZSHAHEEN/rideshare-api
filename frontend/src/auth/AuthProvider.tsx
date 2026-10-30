@@ -149,7 +149,8 @@ export function dashboardPath(user: User, mode?: AccountMode | null) {
   return user.role === 'admin' || !selected ? '/account' : `/${selected}`;
 }
 
-const RETURNABLE = /^\/(passenger|driver|account)(?:$|[?#])/;
+// Driver sub-routes are listed exactly (M3); nothing else under /driver/ is a return target.
+const RETURNABLE = /^\/(?:passenger|account|driver(?:\/rides(?:\/(?:new|[1-9]\d{0,9}))?)?)(?:$|[?#])/;
 /**
  * A same-origin path to return to after signing in, or null. Only in-app
  * dashboard paths qualify; protocol-relative, absolute and backslash tricks

@@ -1,4 +1,4 @@
-import type { Booking, BookingStatus, LoginInput, PassengerBooking, RegisterInput, Ride, RideSearch, Token, User } from './types';
+import type { Booking, BookingStatus, DriverBooking, LoginInput, PassengerBooking, RegisterInput, Ride, RideCreateInput, RideSearch, RideStatus, Token, User } from './types';
 
 export class ApiError extends Error {
   /**
@@ -84,7 +84,8 @@ export function createApiClient(
     register: (input: RegisterInput, signal?: AbortSignal) => request<User>('/auth/register', { method: 'POST', body: input, public: true, signal }),
     login: (input: LoginInput, signal?: AbortSignal) => request<Token>('/auth/login', { method: 'POST', body: input, public: true, signal }),
     me: (token: string, signal?: AbortSignal) => request<User>('/me', { token, signal }),
-    myRides: (offset: number, signal?: AbortSignal) => request<Ride[]>(`/rides/me?limit=20&offset=${offset}`, { signal }),
+    myRides: (offset: number, signal?: AbortSignal, options: { status?: RideStatus; limit?: number } = {}) =>
+      request<Ride[]>(`/rides/me?limit=${options.limit ?? 20}&offset=${offset}${options.status ? `&status=${options.status}` : ''}`, { signal }),
     myBookings: (offset: number, signal?: AbortSignal, options: { status?: BookingStatus; limit?: number } = {}) =>
       request<PassengerBooking[]>(`/bookings/me?limit=${options.limit ?? 20}&offset=${offset}${options.status ? `&status=${options.status}` : ''}`, { signal }),
     // Passenger journey (AST-023). Driver endpoints are added beside these later.
@@ -92,6 +93,14 @@ export function createApiClient(
     getRide: async (rideId: number, signal?: AbortSignal) => request<Ride>(`/rides/${positiveId(rideId)}`, { signal }),
     bookRide: async (rideId: number, signal?: AbortSignal) => request<Booking>(`/bookings/${positiveId(rideId)}`, { method: 'POST', signal }),
     cancelBooking: async (bookingId: number, signal?: AbortSignal) => request<Booking>(`/bookings/${positiveId(bookingId)}/cancel`, { method: 'PATCH', signal }),
+    // Driver journey (M3). The server enforces driver capability and ownership on every call.
+    createRide: (input: RideCreateInput, signal?: AbortSignal) => request<Ride>('/rides/', { method: 'POST', body: input, signal }),
+    rideBookings: async (rideId: number, signal?: AbortSignal, options: { status?: BookingStatus; limit?: number; offset?: number } = {}) =>
+      request<DriverBooking[]>(`/rides/${positiveId(rideId)}/bookings?limit=${options.limit ?? 100}&offset=${options.offset ?? 0}${options.status ? `&status=${options.status}` : ''}`, { signal }),
+    respondToBooking: async (bookingId: number, accept: boolean, signal?: AbortSignal) =>
+      request<Booking>(`/bookings/${positiveId(bookingId)}/respond?accept=${accept ? 'true' : 'false'}`, { method: 'PATCH', signal }),
+    cancelRide: async (rideId: number, signal?: AbortSignal) => request<Ride>(`/rides/${positiveId(rideId)}/cancel`, { method: 'PATCH', signal }),
+    completeRide: async (rideId: number, signal?: AbortSignal) => request<Ride>(`/rides/${positiveId(rideId)}/complete`, { method: 'PATCH', signal }),
   };
 }
 export type ApiClient = ReturnType<typeof createApiClient>;

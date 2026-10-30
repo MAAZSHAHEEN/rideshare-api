@@ -71,6 +71,16 @@ Screenshots are saved under ignored `test-results/`.
   (401/403/404/409/422/429/5xx/network), My bookings grouping and cancel dialog,
   session reload/return path, 390px layout and axe scans. Set
   `PASSENGER_SCREENS_DIR=/abs/dir` to also capture review screenshots.
+- `e2e/driver.spec.ts`: driver journey (M3) against a stateful in-browser mock:
+  publish (client validation, server 422 mapping), my rides filters, incoming
+  requests, accept/reject, every accept 409 (departed, no seats, already
+  responded, concurrent) with re-fetch, 401/403/404/422/429/5xx/network, cancel
+  and complete dialogs, deep-link reloads, 390px layout and axe scans. Set
+  `DRIVER_SCREENS_DIR=/abs/dir` to capture review screenshots.
+- `e2e/driver-live.spec.ts`: opt-in M3 Definition of Done on a disposable backend:
+  a driver registers and publishes in the browser, two passengers (separate
+  browser contexts) request seats, the driver accepts one (seats drop) and
+  rejects the other.
 - `e2e/live-backend.spec.ts`, `e2e/passenger-live.spec.ts`: opt-in contract
   checks against a local FastAPI serving `dist/` on a disposable database (the
   passenger one seeds a ride as a driver through the API, then books and cancels
@@ -92,6 +102,15 @@ Playwright download is unavailable (for example linux-arm64). Never point
 
 - Landing, responsive navigation/footer, login and registration, separate
   passenger/driver layouts, read-only paginated history, and a read-only account.
+- Driver journey (M3): `/driver` (overview), `/driver/rides/new` (publish a
+  scheduled ride; departure entered in PKT and sent as ISO with `+05:00`),
+  `/driver/rides[?filter=upcoming|departed|completed|cancelled]`, and
+  `/driver/rides/<id>` (seat requests by status, accept/reject, cancel ride,
+  complete after departure). These are real paths: the backend serves
+  `index.html` for `/driver/*` and `/passenger/*` (`frontend_serving.CLIENT_AREAS`).
+  Client checks mirror the server's ride rules, but the API stays authoritative
+  for driver capability, ownership, seats and departure. No driver verification
+  exists, so the UI says "Driver documents not verified" and never "verified".
 - Passenger journey (AST-023): `/passenger?view=search` (from, to, date filters
   in the URL), `/passenger?ride=<id>` (details + request a seat),
   `/passenger?view=bookings[&status=…]` (grouped by status, cancel with
