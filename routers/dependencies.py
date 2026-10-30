@@ -56,3 +56,20 @@ async def get_current_user(
         raise unauthorized
 
     return user
+
+
+ADMIN_FORBIDDEN_DETAIL = "Admin access required"
+
+
+async def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Gate for every admin-only route.
+
+    Authentication failures (missing, malformed, expired or role-mismatched
+    token) stay 401 from get_current_user. An authenticated passenger/driver
+    gets 403. The role is the one re-read from the database by
+    get_current_user (and required to equal the signed claim), so a demoted
+    admin's old token is rejected with 401, not honoured until expiry.
+    """
+    if current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail=ADMIN_FORBIDDEN_DETAIL)
+    return current_user
