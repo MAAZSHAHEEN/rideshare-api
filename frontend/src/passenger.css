@@ -1,0 +1,62 @@
+/* Passenger journey (AST-023). Mobile-first additions; shared tokens live in styles.css. */
+.passenger-view{min-width:0}
+.dashboard-shell>.dashboard-sidebar{min-width:0}
+.view-heading{margin-bottom:22px}
+.view-heading h1{font-size:1.75rem;margin-top:8px;overflow-wrap:anywhere}
+.view-heading h1:focus{outline:none}
+.view-heading p{font-size:.8rem;margin-top:8px}
+.banner-cta{margin-top:16px}
+.search-form{border:1px solid var(--line);border-radius:13px;padding:18px;background:#fbfcff}
+.search-fields{display:grid;grid-template-columns:minmax(0,1fr);gap:4px}
+.search-fields input{min-width:0;max-width:100%}
+.search-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+.search-actions .button{flex:1 1 140px}
+.search-form>.field-help{margin-top:0}
+.results-panel{margin-top:24px;border:1px solid var(--line);border-radius:13px;overflow:hidden}
+.ride-list{list-style:none;margin:0;padding:0}
+.ride-list>li{border-bottom:1px solid #edf1f6}
+.ride-list>li:last-child{border-bottom:0}
+.ride-card{display:flex;flex-direction:column;gap:12px;padding:16px}
+.ride-card-main{min-width:0}
+.ride-card h3,.ride-card h4{font-family:'Manrope',Arial,sans-serif;font-size:.95rem;margin:0;overflow-wrap:anywhere;letter-spacing:-.02em}
+.ride-card h3>span,.ride-card h4>span{color:var(--muted);padding:0 4px}
+.ride-time{display:flex;align-items:center;gap:6px;font-size:.75rem;margin-top:6px}
+.ride-facts{display:flex;flex-wrap:wrap;gap:8px 18px;margin:10px 0 0}
+.ride-facts>div{display:flex;flex-direction:column;gap:2px}
+.ride-facts dt{font-size:.62rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.ride-facts dd{margin:0;font-size:.8rem;font-weight:600;color:var(--ink)}
+.ride-facts dd>span:not(.status-pill){font-weight:400;color:var(--muted)}
+.card-actions{display:flex;gap:8px;flex-wrap:wrap}
+.card-actions .button,.ride-card>.button{min-height:44px}
+.status-pill.departed{background:#f3eefa;color:#5d3d8a}
+.status-pill.upcoming{background:#eef3f8;color:#3f556e}
+.state-panel.bordered{border:1px solid var(--line);border-radius:13px}
+.state-title{font-size:1.05rem}
+.detail-card{border:1px solid var(--line);border-radius:13px;overflow:hidden}
+.detail-facts{margin:0;padding:6px 16px}
+.detail-facts>div{display:grid;grid-template-columns:1fr;gap:2px;padding:12px 0;border-bottom:1px solid #edf1f6}
+.detail-facts>div:last-child{border-bottom:0}
+.detail-facts dt{font-size:.68rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.detail-facts dd{margin:0;font-size:.9rem;font-weight:600;color:var(--ink);display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.booking-box{border-top:1px solid var(--line);padding:16px;background:#fbfcff}
+.booking-box .notice{margin:0 0 12px}
+.booking-box .notice a{color:var(--blue);font-weight:650;text-decoration:underline}
+.booking-hint{font-size:.8rem;margin-bottom:12px}
+.status-tabs{display:flex;gap:6px;overflow-x:auto;padding:4px 2px 10px;margin-bottom:6px}
+.status-tabs button{border:1px solid #d8e1eb;background:#fff;border-radius:20px;padding:8px 14px;min-height:40px;font-size:.78rem;font-weight:600;white-space:nowrap;color:#40556e}
+.status-tabs button.selected{background:var(--blue);border-color:var(--blue);color:#fff}
+.booking-group{padding-top:14px}
+.booking-group+.booking-group{border-top:1px solid var(--line)}
+.booking-group>h3{font-size:.95rem;padding:0 16px}
+.group-count{color:var(--muted);font-weight:500}
+.group-help{font-size:.72rem;padding:2px 16px 6px}
+.button.danger{background:#a8322b;border-color:#a8322b;color:#fff}
+.button.danger:hover:not(:disabled){background:#8c2822}
+.danger-outline{color:#a8322b}
+.dialog-backdrop{position:fixed;inset:0;background:#152a4366;display:flex;align-items:flex-end;justify-content:center;padding:12px;z-index:50}
+.dialog{background:#fff;border-radius:14px;padding:22px;width:100%;max-width:440px;box-shadow:0 20px 50px #152a4330}
+.dialog h2{font-size:1.25rem}
+.dialog-body p{font-size:.84rem;margin-top:10px}
+.dialog-actions{display:flex;flex-direction:column-reverse;gap:10px;margin-top:20px}
+.dialog .notice{margin:14px 0 0}
+@media(min-width:640px){.search-fields{grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.search-actions .button{flex:0 0 auto}.ride-card{flex-direction:row;align-items:center;justify-content:space-between;padding:18px 22px}.ride-card-main{flex:1}.detail-facts>div{grid-template-columns:170px 1fr;align-items:center}.dialog-backdrop{align-items:center}.dialog-actions{flex-direction:row;justify-content:flex-end}.view-heading h1{font-size:2rem}}

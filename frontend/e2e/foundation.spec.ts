@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import type { Page } from '@playwright/test';
 
 // Browser contract fixtures only: no accounts are created on a real server.
@@ -82,7 +82,7 @@ test('invalid password fails locally; server validation and conflict are accessi
   await expect(page.getByRole('alert')).toBeFocused();
 });
 
-test('passenger identity controls navigation; logout and reload end sessions', async ({ page }, testInfo) => {
+test('passenger identity controls navigation; logout ends the session, reload keeps it (AST-023)', async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto('/passenger');
   await expect(page).toHaveURL('/login');
@@ -98,13 +98,19 @@ test('passenger identity controls navigation; logout and reload end sessions', a
   await page.screenshot({ path: testInfo.outputPath('passenger-desktop.png'), fullPage: true });
   await page.getByRole('link', { name: 'My account', exact: true }).click();
   await expect(page.getByText(identity.email)).toBeVisible();
-  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
+  // AST-023: only the tab-scoped session key; nothing in localStorage, no profile data.
+  expect(await page.evaluate(() => ({ local: localStorage.length, keys: Object.keys(sessionStorage) }))).toEqual({ local: 0, keys: ['rideshare.session.v1'] });
+  expect(await page.evaluate(() => sessionStorage.getItem('rideshare.session.v1'))).not.toContain(identity.email);
   await page.getByRole('main').getByRole('button', { name: 'Log out', exact: true }).click();
+  await expect(page).toHaveURL('/login');
+  expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
+  await page.reload();
   await expect(page).toHaveURL('/login');
   await login(page);
   await expect(page).toHaveURL('/passenger');
   await page.reload();
-  await expect(page).toHaveURL('/login');
+  await expect(page).toHaveURL('/passenger');
+  await expect(page.getByRole('heading', { name: 'Your journey is just beginning.' })).toBeVisible();
 });
 
 test('driver dashboard displays real response shape and is responsive', async ({ page }, testInfo) => {
@@ -202,7 +208,7 @@ for (const role of ['passenger', 'driver']) test(`legacy ${role} switches both d
   expect(authHeaders.length).toBeGreaterThanOrEqual(2);
   expect(new Set(authHeaders).size).toBe(1);
   expect(authHeaders[0]).toMatch(/^Bearer /);
-  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
+  expect(await page.evaluate(() => ({ local: localStorage.length, keys: Object.keys(sessionStorage) }))).toEqual({ local: 0, keys: ['rideshare.session.v1'] });
   await page.screenshot({ path: testInfo.outputPath('dual-mode-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   const passengerLink = page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: 'Passenger Mode' });
