@@ -148,7 +148,13 @@ Passenger cancellation on completed/cancelled rides returns 409. In particular,
 accepted bookings on completed rides cannot be cancelled or restore seats. If
 passenger cancellation wins the Ride lock before completion, its cancellation
 and any valid seat restoration persist; completion may then also succeed.
-No departure-time cutoff is imposed by this endpoint.
+Cancellation cut-off: an *accepted* booking can no longer be cancelled once
+the ride's `departure_time` is at or before the current UTC time; the endpoint
+returns 409 (`Ride has already departed`) and the seat is not restored. A
+*pending* request can still be withdrawn after departure. The check runs after
+both row locks, using `clock.utc_now()`. Driver ride cancellation has no
+cut-off. All ride/booking transitions are defined in `lifecycle.py`; see
+`docs/architecture/BOOKING_LIFECYCLE.md` for the full state tables and races.
 
 API errors use FastAPI's existing `{"detail": ...}` response. Authentication
 failures return 401 with `WWW-Authenticate: Bearer`; login uses the same generic

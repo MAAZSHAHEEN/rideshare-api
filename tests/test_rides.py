@@ -61,8 +61,9 @@ class RideTests(unittest.IsolatedAsyncioTestCase):
         overrides = patch.dict(app.dependency_overrides, {get_db: override_get_db})
         overrides.start()
         self.addCleanup(overrides.stop)
-        clock = patch("services.rides.datetime")
-        clock.start().now.return_value = NOW
+        # Ride creation and search read the shared lifecycle clock (clock.py).
+        clock = patch("clock.utc_now", return_value=NOW)
+        clock.start()
         self.addCleanup(clock.stop)
         self.client = AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
         self.addAsyncCleanup(self.client.aclose)
