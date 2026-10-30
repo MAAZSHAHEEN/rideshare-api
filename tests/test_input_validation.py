@@ -16,7 +16,7 @@ from uuid import uuid4
 import bcrypt
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateSchema
@@ -27,6 +27,7 @@ with patch.dict(os.environ, {
     "DATABASE_URL": TEST_DATABASE_URL or "postgresql+asyncpg://localhost/input_validation_unused",
     "SECRET_KEY": "input-validation-tests-only-not-a-production-key",
 }):
+    import database
     from database import get_db
     from main import app
     from models import User, UserRole
@@ -255,7 +256,9 @@ class LegacyIdentityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         if make_url(TEST_DATABASE_URL).drivername != "postgresql+asyncpg":
             raise ValueError("TEST_DATABASE_URL must use postgresql+asyncpg")
-        engine = create_async_engine(TEST_DATABASE_URL)
+        # Same parameter hiding as database.engine, so the log assertions below
+        # exercise application code rather than this test's own engine.
+        engine = create_async_engine(TEST_DATABASE_URL, hide_parameters=True)
         self.addAsyncCleanup(engine.dispose)
         self.connection = await engine.connect()
         self.addAsyncCleanup(self.connection.close)
@@ -291,8 +294,21 @@ class LegacyIdentityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_registration_stores_canonical_cnic_and_phone(self):
         payload = registration(cnic="00000-0000000-7", phone_number="+92 300 0000007")
-        response = await self.client.post("/auth/register", json=payload)
+        capture = _CaptureAll()
+        root = logging.getLogger()
+        old_level = root.level
+        root.addHandler(capture)
+        root.setLevel(logging.DEBUG)  # application/framework loggers; SQL echo: see hide_parameters test
+        try:
+            response = await self.client.post("/auth/register", json=payload)
+        finally:
+            root.removeHandler(capture)
+            root.setLevel(old_level)
         self.assertEqual(response.status_code, 201, response.text)
+        logged = "\n".join(capture.text)
+        for value in ("0000000000007", "00000-0000000-7", "+923000000007", "300 0000007",
+                      payload["password"]):
+            self.assertNotIn(value, logged, "sensitive value written to logs")
         self.assertNotIn("cnic", response.json())
         self.assertNotIn("phone_number", response.json())
         row = (await self.connection.execute(select(User.cnic, User.phone_number).where(
@@ -327,6 +343,19 @@ class LegacyIdentityTests(unittest.IsolatedAsyncioTestCase):
         await self.insert_legacy("00000-0000005-5")
         response = await self.client.post("/auth/register", json=registration(cnic="0000000000056"))
         self.assertEqual(response.status_code, 201, response.text)
+
+    async def test_app_engine_hides_bound_parameters_in_errors(self):
+        self.assertTrue(database.engine.sync_engine.hide_parameters)
+        marker = "00000-0000000-0-private-marker"
+        with self.assertRaises(Exception) as caught:
+            async with database.engine.connect() as connection:
+                # Fails server-side (division by zero) after binding the value, so only
+                # SQLAlchemy's "[parameters: ...]" suffix could reveal it. Note: driver
+                # coercion errors and PostgreSQL DETAIL text can still contain values;
+                # see docs/privacy/CNIC_PHONE_PROTECTION.md.
+                await connection.execute(text("SELECT CAST(:value AS text), 1 / 0"), {"value": marker})
+        self.assertNotIn(marker, str(caught.exception))
+        self.assertIn("hidden", str(caught.exception))
 
     async def test_legacy_user_with_old_formats_can_still_log_in(self):
         email, password = await self.insert_legacy("legacy cnic 1", phone="0300 000 0009")

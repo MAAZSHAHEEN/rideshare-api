@@ -7,7 +7,10 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-engine = create_async_engine(DATABASE_URL)
+# hide_parameters: bound values (CNIC, phone, password hashes) never appear in
+# SQLAlchemy exception text or SQL echo/debug logs, e.g. an unexpected
+# IntegrityError traceback logged by the server.
+engine = create_async_engine(DATABASE_URL, hide_parameters=True)
 
 SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
