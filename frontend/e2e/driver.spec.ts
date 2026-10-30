@@ -433,7 +433,8 @@ test.describe('driver screenshots', () => {
       const api = new MockDriverApi();
       await page.setViewportSize(viewport);
       await signIn(page, api);
-      const shot = async (name: string, fullPage = true) => { await settle(page); await page.screenshot({ path: `${screensDir}/${device}-${name}.png`, fullPage }); };
+      // Full-page captures start at the top: a fixed, off-screen element (the skip link) is otherwise painted at the old scroll offset.
+      const shot = async (name: string, fullPage = true) => { await settle(page); if (fullPage) await page.evaluate(() => window.scrollTo(0, 0)); await page.screenshot({ path: `${screensDir}/${device}-${name}.png`, fullPage }); };
       await shot('01-dashboard');
       await page.goto('/driver/rides/new');
       await page.getByLabel('From').fill('Lahore');
