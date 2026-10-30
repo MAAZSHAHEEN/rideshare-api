@@ -85,10 +85,13 @@ class MockApi {
   }
 }
 
-async function signIn(page: Page, api: MockApi, path = '/login') {
+async function signIn(page: Page, api: MockApi) {
   await api.install(page);
-  await page.goto(path);
+  await page.goto('/login');
   await fillLogin(page);
+  // Wait until the session is established (and saved for this tab) before any navigation.
+  await expect(page).toHaveURL('/passenger');
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('rideshare.session.v1'))).not.toBeNull();
 }
 const pktDate = (hoursFromNow: number) => new Date(Date.now() + hoursFromNow * HOUR + 5 * HOUR).toISOString().slice(0, 10);
 const main = (page: Page) => page.getByRole('main');
