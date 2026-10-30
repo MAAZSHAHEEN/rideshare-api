@@ -286,6 +286,22 @@ upgrade. Set `TEST_DATABASE_URL` to a dedicated PostgreSQL test database and run
 requires `CREATEDB` permission: it creates and removes its own disposable database
 on that test server, without modifying the configured database's application data.
 
+## Security headers
+
+`security_headers.py` adds `X-Content-Type-Options`, `X-Frame-Options: DENY`,
+`Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy` and a
+same-origin `Content-Security-Policy` to every HTTP response, including static
+assets, 404/405/422 errors and CORS preflights. Headers a route sets itself are
+kept. Fonts are self-hosted (`@fontsource-variable`), so the SPA policy allows
+no third-party origins. `/docs` and `/redoc` get a narrower policy that allows
+FastAPI's default CDN assets.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SECURITY_HEADERS_ENABLED` | `true` | Kill switch for rollback |
+| `HSTS_ENABLED` | `false` | Send `Strict-Transport-Security`; enable only once the domain is confirmed HTTPS-only |
+| `HSTS_MAX_AGE` | `31536000` | HSTS lifetime in seconds |
+
 ## Authentication rate limiting (disabled pending proxy verification)
 
 Authentication throttling is opt-in through `AUTH_RATE_LIMIT_ENABLED=true`.
