@@ -60,14 +60,36 @@ def email_matches(email: str):
     return func.lower(User.email) == func.lower(email)
 
 
+async def find_login_user(db: AsyncSession, email: str):
+    """Return the single account for a login email, or None when absent or ambiguous.
+
+    Before migration f6b2d8e0c413 creates uq_users_email_lower, legacy data may hold
+    case twins (two rows equal under lower()). scalar_one_or_none() would raise and
+    turn login into HTTP 500. Prefer the row whose stored email matches exactly
+    (unique via ix_users_email); otherwise an ambiguous match fails as a normal 401.
+    """
+    rows = (await db.execute(
+        select(User)
+        .where(email_matches(email))
+        .order_by((User.email == email).desc(), User.id)
+        .limit(2)
+    )).scalars().all()
+    if len(rows) == 1:
+        return rows[0]
+    if len(rows) == 2 and rows[0].email == email and rows[1].email != email:
+        return rows[0]
+    return None
+
+
 # --- Routes ---
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     # Check duplicate email
     # Compare in PostgreSQL with lower() so the lookup matches uq_users_email_lower,
     # including legacy rows stored before email normalisation.
-    result = await db.execute(select(User).where(email_matches(user_data.email)))
-    if result.scalar_one_or_none():
+    # limit(1): legacy case twins (possible before f6b2) must not raise MultipleResultsFound.
+    result = await db.execute(select(User.id).where(email_matches(user_data.email)).limit(1))
+    if result.first() is not None:
         raise HTTPException(status_code=409, detail="Registration details already in use")
 
     # Check duplicate CNIC
@@ -105,8 +127,7 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
 @router.post("/login", response_model=Token)
 async def login(user_data: UserLogin, request: Request, db: AsyncSession = Depends(get_db)):
     await check_login_identity(request, user_data.email)
-    result = await db.execute(select(User).where(email_matches(user_data.email)))
-    user = result.scalar_one_or_none()
+    user = await find_login_user(db, user_data.email)
 
     valid_password = await run_in_threadpool(
         verify_password, user_data.password, user.password if user else None,

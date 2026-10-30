@@ -22,7 +22,7 @@ from uuid import uuid4
 import bcrypt
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
-from sqlalchemy import func, select, update
+from sqlalchemy import text, func, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateSchema
@@ -220,6 +220,28 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post(
             "/auth/register", json={**self.payload("passenger"), "email": legacy.upper()})
         self.assertEqual(response.status_code, 409)
+
+    async def test_legacy_case_twins_before_unique_index_never_return_500(self):
+        # Pre-f6b2 data may contain case twins; code is deployed before the migration.
+        await self.connection.execute(text("DROP INDEX uq_users_email_lower"))
+        first, created_a = await self.register_user()
+        second, created_b = await self.register_user()
+        base = first["email"]
+        await self.connection.execute(
+            update(User).where(User.id == created_b["id"]).values(email=base.upper()))
+        # Exact stored match logs in the right account.
+        response = await self.login_user({**first, "email": base})
+        self.assertEqual(response.status_code, 200, response.text)
+        # Ambiguous (no exact match among twins) fails as a generic 401, not 500.
+        await self.connection.execute(
+            update(User).where(User.id == created_a["id"]).values(email=base.title()))
+        response = await self.login_user({**first, "email": base})
+        self.assertEqual(response.status_code, 401, response.text)
+        self.assertEqual(response.json(), {"detail": "Invalid email or password"})
+        # Registration with a third case variant is a generic 409, not 500.
+        response = await self.client.post(
+            "/auth/register", json={**self.payload("passenger"), "email": base})
+        self.assertEqual(response.status_code, 409, response.text)
 
     async def test_non_ascii_case_folding_matches_postgresql(self):
         # Python's full case mapping of U+0130 differs from PostgreSQL lower();
