@@ -126,6 +126,13 @@ serialize on the Ride lock, so exactly one terminal ride transition can win.
 - POST /bookings/{ride_id} — book a ride (passenger capability, ordinary accounts)
 - PATCH /bookings/{booking_id}/respond — accept or reject booking (driver capability, ordinary accounts)
 
+Departure rule: once a ride's `departure_time` is at or before the current UTC
+time, booking it and accepting a pending request both return 409
+(`Ride has already departed`). Rejecting a pending request stays allowed so
+drivers can clear stale requests. The check runs after the Ride row lock, so a
+request that waited on a concurrent transaction is judged at the time it
+proceeds. Time comes from `clock.utc_now()`.
+
 `PATCH /bookings/{booking_id}/cancel` lets only the owning passenger cancel a
 pending or accepted booking on an active ride. It returns the existing booking
 JSON with status `cancelled` (200). A pending cancellation does not change seats; an accepted
