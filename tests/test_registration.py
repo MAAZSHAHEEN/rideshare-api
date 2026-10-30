@@ -176,11 +176,14 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.connection.scalar(select(func.count()).select_from(User)), 1)
 
     async def test_database_probe_failure_returns_generic_503(self):
-        with patch("main.engine") as engine:
+        # /test-db was retired by AST-010; /readyz is the readiness probe.
+        self.assertEqual((await self.client.get("/test-db")).status_code, 404)
+        with patch("health.database.engine") as engine:
             engine.connect.side_effect = RuntimeError("private diagnostic must not escape")
-            response = await self.client.get("/test-db")
+            response = await self.client.get("/readyz")
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json(), {"detail": "Database unavailable"})
+        self.assertEqual(response.json()["checks"]["database"], "unavailable")
+        self.assertNotIn("private diagnostic", response.text)
 
     async def token_claims(self):
         _, user = await self.register_user()
