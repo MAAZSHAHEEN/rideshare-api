@@ -102,7 +102,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as connection:
             return await connection.run_sync(inspect_schema)
 
-    async def assert_metadata_matches(self, metadata=None, revision_id="e3a7c41b9f52"):
+    async def assert_metadata_matches(self, metadata=None, revision_id="f6b2d8e0c413"):
         metadata = metadata if metadata is not None else Base.metadata
 
         def compare(connection):
@@ -160,14 +160,21 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                      "ix_bookings_ride_id_id": ["ride_id", "id"]},
     }
 
-    def task8_metadata(self):
-        """Schema at d924a6e38f10, before the AST-003 FK listing indexes."""
+    def task9_metadata(self):
+        """Schema at e3a7c41b9f52, before the AST-005 lower(email) index."""
         metadata = MetaData()
         for table in Base.metadata.sorted_tables:
             historical_table = table.to_metadata(metadata)
-            added = self.FK_INDEXES.get(table.name, {})
             historical_table.indexes = {index for index in historical_table.indexes
-                                        if index.name not in added}
+                                        if index.name != "uq_users_email_lower"}
+        return metadata
+
+    def task8_metadata(self):
+        """Schema at d924a6e38f10, before the AST-003 FK listing indexes."""
+        metadata = self.task9_metadata()
+        for table in metadata.sorted_tables:
+            added = self.FK_INDEXES.get(table.name, {})
+            table.indexes = {index for index in table.indexes if index.name not in added}
         return metadata
 
     def task7_metadata(self):
@@ -385,8 +392,8 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await fk_indexes(), {"rides": {}, "bookings": {}})
         for attempt in range(2):
-            await self.run_python("-m", "alembic", "upgrade", "head")
-            await self.assert_metadata_matches()
+            await self.run_python("-m", "alembic", "upgrade", "e3a7c41b9f52")
+            await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
             self.assertEqual(await fk_indexes(), {
                 table: {name: (columns, False) for name, columns in expected.items()}
                 for table, expected in self.FK_INDEXES.items()
@@ -412,7 +419,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
             WHERE indexrelid = 'ix_rides_driver_id_departure_time_id'::regclass
         """)
         await self.run_python("-m", "alembic", "upgrade", "e3a7c41b9f52")
-        await self.assert_metadata_matches()
+        await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
         async with self.engine.connect() as connection:
             rows = (await connection.execute(text("""
                 SELECT c.relname, i.indisvalid FROM pg_index i
@@ -424,6 +431,52 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows, [("ix_bookings_passenger_id_id", True),
                                 ("ix_bookings_ride_id_id", True),
                                 ("ix_rides_driver_id_departure_time_id", True)])
+
+    async def test_case_insensitive_email_index_preflight_upgrade_downgrade(self):
+        await self.prepare_integrity_data("e3a7c41b9f52")
+        await self.execute_sql("""
+            INSERT INTO users (id, name, email, password, cnic, phone_number, role)
+            VALUES (3, 'Legacy', 'Driver@Example.com', 'test-hash', '3', '3', 'passenger')
+        """)
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("CaseDuplicateEmails", output)
+        self.assertIn("Affected user IDs: [[1, 3]]", output)
+        self.assertNotIn("example.com", output.lower())
+        await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
+        async with self.engine.connect() as connection:
+            self.assertEqual(await connection.scalar(text("SELECT count(*) FROM users")), 3)
+
+        # A mixed-case legacy row without a case twin is kept as stored.
+        await self.execute_sql("UPDATE users SET email = 'Legacy@Example.com' WHERE id = 3")
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "head")
+            await self.assert_metadata_matches()
+            async with self.engine.connect() as connection:
+                self.assertEqual(await connection.scalar(
+                    text("SELECT email FROM users WHERE id = 3")), "Legacy@Example.com")
+            await self.assert_sql_rejected("""
+                INSERT INTO users (id, name, email, password, cnic, phone_number, role)
+                VALUES (4, 'Twin', 'LEGACY@example.COM', 'h', '4', '4', 'passenger')
+            """, "23505", "uq_users_email_lower")
+            if attempt == 0:
+                await self.run_python("-m", "alembic", "downgrade", "-1")
+                await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
+
+    async def test_full_upgrade_stopped_by_email_preflight_keeps_index_revision(self):
+        # Production path: d924a6e38f10 -> head in one command. When the AST-005
+        # preflight aborts, AST-003's committed concurrent indexes and its version
+        # stamp must stay together so the retry after cleanup succeeds.
+        await self.prepare_integrity_data("d924a6e38f10")
+        await self.execute_sql("""
+            INSERT INTO users (id, name, email, password, cnic, phone_number, role)
+            VALUES (3, 'Legacy', 'Driver@Example.com', 'test-hash', '3', '3', 'passenger')
+        """)
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("CaseDuplicateEmails", output)
+        await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
+        await self.execute_sql("UPDATE users SET email = 'legacy@example.com' WHERE id = 3")
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        await self.assert_metadata_matches()
 
     async def test_invalid_existing_data_aborts_migration_without_rewriting_rows(self):
         await self.prepare_integrity_data("50872040220b")
