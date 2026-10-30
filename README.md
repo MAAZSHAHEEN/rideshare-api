@@ -97,6 +97,13 @@ Revision `b83d12f7a906` adds `ix_rides_status_departure_time_id` on
 Apply it with `alembic upgrade head`. This ordinary transactional index build
 can block writes while it runs; schedule it appropriately for populated databases.
 
+Revision `e3a7c41b9f52` (AST-003) adds foreign-key-led indexes for owner listings
+and booking locks: `ix_rides_driver_id_departure_time_id`,
+`ix_bookings_passenger_id_id` and `ix_bookings_ride_id_id`. They are built with
+`CREATE INDEX CONCURRENTLY` outside a transaction, so writes continue during the
+build. If a build is interrupted, run `alembic downgrade d924a6e38f10` (drops
+them with `IF EXISTS`) and upgrade again. Not yet applied to production.
+
 `PATCH /rides/{ride_id}/cancel` lets only the owning driver transition an active
 ride to cancelled. It returns the existing ride JSON (200). Missing rides return
 404, completed/already-cancelled rides return 409, and non-owners or admins
