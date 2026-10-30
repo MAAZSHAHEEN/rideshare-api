@@ -5,7 +5,7 @@ import secrets
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request
 from jose import jwt
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -55,11 +55,18 @@ def create_access_token(user_id: int, role: str) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def email_matches(email: str):
+    """Case-insensitive email predicate served by the uq_users_email_lower index."""
+    return func.lower(User.email) == func.lower(email)
+
+
 # --- Routes ---
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     # Check duplicate email
-    result = await db.execute(select(User).where(User.email == user_data.email))
+    # Compare in PostgreSQL with lower() so the lookup matches uq_users_email_lower,
+    # including legacy rows stored before email normalisation.
+    result = await db.execute(select(User).where(email_matches(user_data.email)))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Registration details already in use")
 
@@ -85,7 +92,7 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
         cause = exc.orig.__cause__
         if (
             getattr(exc.orig, "sqlstate", None) == "23505"
-            and getattr(cause, "constraint_name", None) in {"ix_users_email", "users_cnic_key"}
+            and getattr(cause, "constraint_name", None) in {"ix_users_email", "uq_users_email_lower", "users_cnic_key"}
         ):
             raise HTTPException(
                 status_code=409, detail="Registration details already in use"
@@ -98,7 +105,7 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
 @router.post("/login", response_model=Token)
 async def login(user_data: UserLogin, request: Request, db: AsyncSession = Depends(get_db)):
     await check_login_identity(request, user_data.email)
-    result = await db.execute(select(User).where(User.email == user_data.email))
+    result = await db.execute(select(User).where(email_matches(user_data.email)))
     user = result.scalar_one_or_none()
 
     valid_password = await run_in_threadpool(

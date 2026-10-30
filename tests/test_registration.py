@@ -175,6 +175,52 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.json(), {"detail": "Registration details already in use"})
                 self.assertEqual(await self.connection.scalar(select(func.count()).select_from(User)), 1)
 
+    async def test_email_is_trimmed_and_lowercased_on_registration(self):
+        payload = {**self.payload("passenger")}
+        payload["email"] = "  Mixed.Case-" + payload["email"].upper() + "  "
+        response = await self.client.post("/auth/register", json=payload)
+        self.assertEqual(response.status_code, 201, response.text)
+        expected = payload["email"].strip().lower()
+        self.assertEqual(response.json()["email"], expected)
+        self.assertEqual(await self.connection.scalar(select(User.email)), expected)
+
+    async def test_case_variant_email_registration_returns_generic_conflict(self):
+        payload, _ = await self.register_user()
+        for variant in (payload["email"].upper(), payload["email"].title(), f" {payload['email']} "):
+            with self.subTest(variant=variant):
+                response = await self.client.post(
+                    "/auth/register", json={**self.payload("passenger"), "email": variant})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json(), {"detail": "Registration details already in use"})
+        self.assertEqual(await self.connection.scalar(select(func.count()).select_from(User)), 1)
+
+    async def test_case_variant_unique_index_race_maps_to_generic_conflict(self):
+        payload, _ = await self.register_user()
+        # Skip the application pre-check so only uq_users_email_lower can reject it.
+        with patch.object(auth, "email_matches", return_value=User.id == -1):
+            response = await self.client.post("/auth/register", json={
+                **self.payload("passenger"), "email": payload["email"].upper()})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"detail": "Registration details already in use"})
+
+    async def test_login_is_case_insensitive(self):
+        payload, _ = await self.register_user()
+        for variant in (payload["email"].upper(), f"  {payload['email'].title()} "):
+            with self.subTest(variant=variant):
+                response = await self.login_user({**payload, "email": variant})
+                self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_legacy_mixed_case_row_can_log_in_and_blocks_case_twins(self):
+        payload, created = await self.register_user()
+        legacy = "Legacy." + payload["email"].replace("registration", "Registration")
+        await self.connection.execute(
+            update(User).where(User.id == created["id"]).values(email=legacy))
+        response = await self.login_user({**payload, "email": legacy.lower()})
+        self.assertEqual(response.status_code, 200, response.text)
+        response = await self.client.post(
+            "/auth/register", json={**self.payload("passenger"), "email": legacy.upper()})
+        self.assertEqual(response.status_code, 409)
+
     async def test_database_probe_failure_returns_generic_503(self):
         with patch("main.engine") as engine:
             engine.connect.side_effect = RuntimeError("private diagnostic must not escape")

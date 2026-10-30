@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, Index, Integer, String, DateTime, Enum as SAEnum, ForeignKey, text
+from sqlalchemy import CheckConstraint, Column, Index, Integer, String, DateTime, Enum as SAEnum, ForeignKey, func, text
 from database import Base
 
 
@@ -19,6 +19,10 @@ class RideStatus(str, enum.Enum):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        # Case-insensitive email identity; created by f6b2d8e0c413 (AST-005).
+        Index('uq_users_email_lower', func.lower(text('email')), unique=True),
+    )
 
     id           = Column(Integer, primary_key=True)
     name         = Column(String, nullable=False)

@@ -8,6 +8,16 @@ from permissions import AccountMode, allowed_modes
 PASSWORD_MAX_BYTES = 72
 
 
+def normalize_email(value: str) -> str:
+    """Email identity is case-insensitive: store and compare trimmed lowercase."""
+    return value.strip().lower()
+
+
+def normalize_email_input(value):
+    # Non-strings fall through to EmailStr's own validation error.
+    return normalize_email(value) if isinstance(value, str) else value
+
+
 def validate_password_input(value: str) -> str:
     if not value.strip():
         raise ValueError("Password must not be blank")
@@ -25,6 +35,7 @@ class UserCreate(BaseModel):
     role:         Literal[UserRole.passenger, UserRole.driver] = UserRole.passenger
 
     _validate_password = field_validator("password")(validate_password_input)
+    _normalize_email = field_validator("email", mode="before")(normalize_email_input)
 
 
 class UserResponse(BaseModel):
@@ -47,6 +58,7 @@ class UserLogin(BaseModel):
     password: str = Field(min_length=1, max_length=PASSWORD_MAX_BYTES, repr=False)
 
     _validate_password = field_validator("password")(validate_password_input)
+    _normalize_email = field_validator("email", mode="before")(normalize_email_input)
 
 
 class Token(BaseModel):

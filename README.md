@@ -104,6 +104,13 @@ and booking locks: `ix_rides_driver_id_departure_time_id`,
 build. If a build is interrupted, run `alembic downgrade d924a6e38f10` (drops
 them with `IF EXISTS`) and upgrade again. Not yet applied to production.
 
+Email identity is case-insensitive (AST-005). Registration and login trim and
+lowercase the email; lookups use `lower(email)`, so accounts stored with mixed
+case before this change still log in. Revision `f6b2d8e0c413` adds the unique
+index `uq_users_email_lower`. Before creating it, the migration aborts without
+changes if any accounts differ only by case, printing the affected user IDs
+(never addresses) so an operator can resolve them. Not yet applied to production.
+
 `PATCH /rides/{ride_id}/cancel` lets only the owning driver transition an active
 ride to cancelled. It returns the existing ride JSON (200). Missing rides return
 404, completed/already-cancelled rides return 409, and non-owners or admins
