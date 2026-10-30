@@ -35,6 +35,8 @@ class Ride(Base):
     __tablename__ = "rides"
     __table_args__ = (
         Index('ix_rides_status_departure_time_id', 'status', 'departure_time', 'id'),
+        # Owner listing (GET /rides/me) and FK lookups; created by e3a7c41b9f52.
+        Index('ix_rides_driver_id_departure_time_id', 'driver_id', 'departure_time', 'id'),
         CheckConstraint('available_seats >= 0', name='ck_rides_available_seats_nonnegative'),
         CheckConstraint('fare_per_seat >= 0', name='ck_rides_fare_per_seat_nonnegative'),
     )
@@ -63,6 +65,10 @@ class Booking(Base):
             'uq_bookings_active_passenger_ride', 'ride_id', 'passenger_id',
             unique=True, postgresql_where=text("status IN ('pending', 'accepted')"),
         ),
+        # Passenger and per-ride booking lists, booking locks and FK lookups;
+        # created by e3a7c41b9f52.
+        Index('ix_bookings_passenger_id_id', 'passenger_id', 'id'),
+        Index('ix_bookings_ride_id_id', 'ride_id', 'id'),
     )
 
     id         = Column(Integer, primary_key=True)

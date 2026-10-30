@@ -102,7 +102,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as connection:
             return await connection.run_sync(inspect_schema)
 
-    async def assert_metadata_matches(self, metadata=None, revision_id="d924a6e38f10"):
+    async def assert_metadata_matches(self, metadata=None, revision_id="e3a7c41b9f52"):
         metadata = metadata if metadata is not None else Base.metadata
 
         def compare(connection):
@@ -154,11 +154,26 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["sequences"], {"users_id_seq", "rides_id_seq", "bookings_id_seq"})
         return state
 
-    def task7_metadata(self):
+    FK_INDEXES = {
+        "rides": {"ix_rides_driver_id_departure_time_id": ["driver_id", "departure_time", "id"]},
+        "bookings": {"ix_bookings_passenger_id_id": ["passenger_id", "id"],
+                     "ix_bookings_ride_id_id": ["ride_id", "id"]},
+    }
+
+    def task8_metadata(self):
+        """Schema at d924a6e38f10, before the AST-003 FK listing indexes."""
         metadata = MetaData()
         for table in Base.metadata.sorted_tables:
             historical_table = table.to_metadata(metadata)
-            Index(f"ix_{table.name}_id", historical_table.c.id)
+            added = self.FK_INDEXES.get(table.name, {})
+            historical_table.indexes = {index for index in historical_table.indexes
+                                        if index.name not in added}
+        return metadata
+
+    def task7_metadata(self):
+        metadata = self.task8_metadata()
+        for table in metadata.sorted_tables:
+            Index(f"ix_{table.name}_id", table.c.id)
         return metadata
 
     def task5_metadata(self):
@@ -329,8 +344,8 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
 
         original = await inspect_constraints_and_indexes()
         for attempt in range(2):
-            await self.run_python("-m", "alembic", "upgrade", "head")
-            await self.assert_metadata_matches()
+            await self.run_python("-m", "alembic", "upgrade", "d924a6e38f10")
+            await self.assert_metadata_matches(self.task8_metadata(), "d924a6e38f10")
             current = await inspect_constraints_and_indexes()
             for table, before in original.items():
                 with self.subTest(attempt=attempt, table=table):
@@ -348,6 +363,67 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.run_python("-m", "alembic", "downgrade", "-1")
                 await self.assert_metadata_matches(self.task7_metadata(), "b83d12f7a906")
                 self.assertEqual(await inspect_constraints_and_indexes(), original)
+
+    async def test_fk_listing_indexes_upgrade_downgrade_reupgrade(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        await self.assert_metadata_matches(self.task8_metadata(), "d924a6e38f10")
+
+        async def fk_indexes():
+            def read(connection):
+                inspector = inspect(connection)
+                return {table: {item["name"]: (item["column_names"], item["unique"])
+                                for item in inspector.get_indexes(table)
+                                if item["name"] in expected}
+                        for table, expected in self.FK_INDEXES.items()}
+            async with self.engine.connect() as connection:
+                return await connection.run_sync(read)
+
+        async def invalid_indexes():
+            async with self.engine.connect() as connection:
+                return await connection.scalar(text(
+                    "SELECT count(*) FROM pg_index WHERE NOT indisvalid"))
+
+        self.assertEqual(await fk_indexes(), {"rides": {}, "bookings": {}})
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "head")
+            await self.assert_metadata_matches()
+            self.assertEqual(await fk_indexes(), {
+                table: {name: (columns, False) for name, columns in expected.items()}
+                for table, expected in self.FK_INDEXES.items()
+            })
+            self.assertEqual(await invalid_indexes(), 0)
+            async with self.engine.connect() as connection:
+                self.assertEqual(await connection.scalar(text("SELECT count(*) FROM rides")), 1)
+            if attempt == 0:
+                await self.run_python("-m", "alembic", "downgrade", "-1")
+                await self.assert_metadata_matches(self.task8_metadata(), "d924a6e38f10")
+                self.assertEqual(await fk_indexes(), {"rides": {}, "bookings": {}})
+
+    async def test_fk_index_upgrade_reruns_and_repairs_interrupted_builds(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        # Simulate an interrupted run: one index finished, one left INVALID by
+        # a failed CREATE INDEX CONCURRENTLY, one never started.
+        await self.execute_sql(
+            "CREATE INDEX ix_bookings_passenger_id_id ON bookings (passenger_id, id)")
+        await self.execute_sql(
+            "CREATE INDEX ix_rides_driver_id_departure_time_id ON rides (driver_id, departure_time, id)")
+        await self.execute_sql("""
+            UPDATE pg_index SET indisvalid = false
+            WHERE indexrelid = 'ix_rides_driver_id_departure_time_id'::regclass
+        """)
+        await self.run_python("-m", "alembic", "upgrade", "e3a7c41b9f52")
+        await self.assert_metadata_matches()
+        async with self.engine.connect() as connection:
+            rows = (await connection.execute(text("""
+                SELECT c.relname, i.indisvalid FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indexrelid
+                WHERE c.relname IN ('ix_rides_driver_id_departure_time_id',
+                                    'ix_bookings_passenger_id_id', 'ix_bookings_ride_id_id')
+                ORDER BY c.relname
+            """))).all()
+        self.assertEqual(rows, [("ix_bookings_passenger_id_id", True),
+                                ("ix_bookings_ride_id_id", True),
+                                ("ix_rides_driver_id_departure_time_id", True)])
 
     async def test_invalid_existing_data_aborts_migration_without_rewriting_rows(self):
         await self.prepare_integrity_data("50872040220b")
