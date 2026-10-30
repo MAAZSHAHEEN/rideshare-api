@@ -10,7 +10,7 @@ const enabled = process.env.E2E_LIVE_BACKEND === '1' && /^http:\/\/(127\.0\.0\.1
 test.describe('live disposable backend', () => {
   test.skip(!enabled, 'Set E2E_LIVE_BACKEND=1 and a loopback PLAYWRIGHT_BASE_URL to run against a local backend.');
 
-  test('register, duplicate 409, bad login, login, empty dashboard, reload signs out', async ({ page }) => {
+  test('register, duplicate 409, bad login, login, empty dashboard, reload keeps the session, logout ends it', async ({ page }) => {
     test.setTimeout(60_000);
     // Unique, obviously fake values per run: example.com email, 12345-prefixed CNIC.
     const run = `${Date.now()}`.slice(-8);
@@ -35,6 +35,12 @@ test.describe('live disposable backend', () => {
     await expect(page).toHaveURL('/passenger');
     await expect(page.getByRole('heading', { name: 'Your journey is just beginning.' })).toBeVisible();
 
+    // AST-023: the tab-scoped session survives a reload and is re-verified with /me.
+    await page.reload();
+    await expect(page).toHaveURL('/passenger');
+    await expect(page.getByRole('heading', { name: 'Your journey is just beginning.' })).toBeVisible();
+    await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Log out' }).click();
+    await expect(page).toHaveURL('/login');
     await page.reload();
     await expect(page).toHaveURL('/login');
   });

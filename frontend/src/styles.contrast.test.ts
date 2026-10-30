@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest';
 // AST-004: WCAG 2.1 AA text contrast for the stylesheet, and no unearned
 // "verified" claims in user-facing copy (the backend verifies nothing yet).
 
-const css = readFileSync(join(__dirname, 'styles.css'), 'utf8');
+// Every stylesheet the app imports is checked (passenger.css: AST-023).
+const css = ['styles.css', 'passenger.css'].map((name) => readFileSync(join(__dirname, name), 'utf8')).join('\n');
 
 const vars = Object.fromEntries(
   [...css.matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{3,6})/g)].map(([, name, value]) => [name, value]),
@@ -84,8 +85,7 @@ describe('stylesheet text contrast (WCAG AA)', () => {
 
 describe('user-facing copy', () => {
   it('makes no verification claims the backend does not back', () => {
-    const dir = join(__dirname, 'pages');
-    for (const file of readdirSync(dir).filter((name) => name.endsWith('.tsx'))) {
+    for (const dir of [join(__dirname, 'pages'), join(__dirname, 'pages', 'passenger')]) for (const file of readdirSync(dir).filter((name) => name.endsWith('.tsx'))) {
       expect(readFileSync(join(dir, file), 'utf8'), file).not.toMatch(/verified by|verified (driver|account|user)s?/i);
     }
   });

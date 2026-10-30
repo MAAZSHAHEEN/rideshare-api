@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError } from '../api/client';
-import { dashboardPath, useAuth } from '../auth/AuthProvider';
+import { dashboardPath, safeReturnPath, useAuth } from '../auth/AuthProvider';
+import { SessionRestoring } from '../components/SessionRestoring';
 import { passwordError } from '../auth/validation';
 import { Icon } from '../components/Icon';
 
 export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   const registering = mode === 'register';
-  const { api, user, login, notice, mode: travelMode } = useAuth();
+  const { api, user, login, notice, mode: travelMode, restoring } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [role, setRole] = useState<'passenger' | 'driver'>('passenger');
@@ -20,7 +21,9 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   const registrationRequest = useRef<AbortController | null>(null);
   useEffect(() => () => registrationRequest.current?.abort(), []);
   useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
-  if (user) return <Navigate to={dashboardPath(user, travelMode)} replace />;
+  const returnTo = registering ? null : safeReturnPath((location.state as { from?: unknown } | null)?.from);
+  if (restoring) return <SessionRestoring />;
+  if (user) return <Navigate to={returnTo ?? dashboardPath(user, travelMode)} replace />;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -40,7 +43,7 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
         navigate('/login', { replace: true, state: { registered: true } });
       } else {
         const identity = await login({ email, password });
-        navigate(dashboardPath(identity), { replace: true });
+        navigate(returnTo ?? dashboardPath(identity), { replace: true });
       }
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === 'AbortError') return;
@@ -71,7 +74,7 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
         </fieldset>
       </form>
       <p className="auth-switch">{registering ? 'Already part of the journey?' : 'New to RideShare?'} <Link to={registering ? '/login' : '/register'}>{registering ? 'Log in' : 'Create an account'}</Link></p>
-      {!registering && <p className="session-note"><Icon name="check" size={14} />Your session stays in this tab’s memory. Reloading signs you out.</p>}
+      {!registering && <p className="session-note"><Icon name="check" size={14} />You stay signed in in this tab until you log out, close it, or your session expires.</p>}
     </div>
   </section>;
 }

@@ -16,3 +16,14 @@ export interface Ride {
 export interface PassengerBooking {
   id: number; ride_id: number; passenger_id: number; status: BookingStatus; ride: Ride;
 }
+
+/** GET /rides/ query. Text filters are exact matches on the server. */
+export interface RideSearch {
+  origin?: string; destination?: string;
+  /** ISO-8601 with offset; inclusive lower bound. */
+  departureFrom?: string;
+  /** ISO-8601 with offset; exclusive upper bound. */
+  departureBefore?: string;
+  minSeats?: number; limit?: number; offset?: number;
+}
+export interface Booking { id: number; ride_id: number; passenger_id: number; status: BookingStatus }

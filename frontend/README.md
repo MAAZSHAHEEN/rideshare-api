@@ -66,8 +66,15 @@ Screenshots are saved under ignored `test-results/`.
   registration, 401/409/422/5xx/network failure states, 390x844 mobile layout.
 - `e2e/a11y.spec.ts`: axe-core WCAG A/AA scan of key pages; serious and critical
   violations fail, every finding is attached to the report.
-- `e2e/live-backend.spec.ts`: opt-in contract check against a local FastAPI
-  serving `dist/` on a disposable database. Skipped unless enabled:
+- `e2e/passenger.spec.ts`: passenger journey (AST-023) against a stateful
+  in-browser mock: search filters, details, request a seat, every booking error
+  (401/403/404/409/422/429/5xx/network), My bookings grouping and cancel dialog,
+  session reload/return path, 390px layout and axe scans. Set
+  `PASSENGER_SCREENS_DIR=/abs/dir` to also capture review screenshots.
+- `e2e/live-backend.spec.ts`, `e2e/passenger-live.spec.ts`: opt-in contract
+  checks against a local FastAPI serving `dist/` on a disposable database (the
+  passenger one seeds a ride as a driver through the API, then books and cancels
+  it in the browser). Skipped unless enabled:
 
 ```sh
 npm run build    # then, from the repo root, with a disposable DATABASE_URL:
@@ -85,6 +92,15 @@ Playwright download is unavailable (for example linux-arm64). Never point
 
 - Landing, responsive navigation/footer, login and registration, separate
   passenger/driver layouts, read-only paginated history, and a read-only account.
+- Passenger journey (AST-023): `/passenger?view=search` (from, to, date filters
+  in the URL), `/passenger?ride=<id>` (details + request a seat),
+  `/passenger?view=bookings[&status=…]` (grouped by status, cancel with
+  confirmation). Views use query parameters because the backend serves only the
+  exact `/passenger` client path (see `frontend_serving.CLIENT_PATHS`).
+  Departure times are always shown in Pakistan time (Asia/Karachi, "PKT"),
+  fares in PKR. The date filter is a PKT calendar day sent as
+  `departure_from`/`departure_before` with `+05:00`. Place names match exactly
+  (server behaviour).
 - Registration sends name, email, password, CNIC, phone number and initial role;
   both modes are included. It redirects to login. No token is assumed from registration.
 - Passwords are preserved exactly. New passwords require 12 Unicode characters,
@@ -102,18 +118,22 @@ Playwright download is unavailable (for example linux-arm64). Never point
   Separate query keys retain ride and booking history when changing modes.
   Guards respect server capabilities but are not security controls: the backend
   independently enforces capabilities, ownership, and no self-booking.
-- Tokens exist only in memory. Reloads and new tabs require login. Logout clears
-  credentials, aborts sign-in, cancels queries and clears the query cache. An old
-  request cannot invalidate a newer session. Logout does not revoke server JWTs.
+- The token is kept in this tab's `sessionStorage` (key `rideshare.session.v1`,
+  token and travel mode only) so a reload keeps the session; new tabs start
+  signed out. On reload it is re-verified with `GET /me` before anything is
+  shown. Logout, 401 and expiry clear it. See
+  [docs/frontend/SESSION_PERSISTENCE.md](../docs/frontend/SESSION_PERSISTENCE.md)
+  for the decision and XSS/CSRF trade-offs. Logout also aborts sign-in, cancels
+  queries and clears the query cache. An old request cannot invalidate a newer
+  session. Logout does not revoke server JWTs.
 - Authenticated 401s and expiry end the session. Protected route checks are UI
   controls; backend authorization remains authoritative.
 - Mutations are not retried automatically. Registration network/server failures
   explain that persistence may have occurred before the response failed.
 - History uses `/rides/me` or `/bookings/me`, limit 20 and offset pagination.
   Counts describe the displayed page, not lifetime totals. All history is shown;
-  active rides are not automatically called upcoming. Times use the browser's
-  timezone. Currency is intentionally not assumed.
-- No ride creation/booking decisions/cancellation UI in this foundation task.
+  active rides are not automatically called upcoming. Times are shown in PKT.
+- No ride creation or driver booking-decision UI yet (driver journey: Milestone 3).
   No fake trips, maps, ratings, payments, social login or admin console.
 
 Production output is `dist/`. FastAPI serves the explicit client routes and
@@ -126,7 +146,8 @@ external image dependency. Keep API/session values out of analytics and logs.
 
 ## Organization
 
-`src/api/` holds backend types, fetch and error handling; `src/auth/` owns memory
-sessions and password validation; `src/pages/` holds screens; `src/components/`
+`src/api/` holds backend types, fetch and error handling; `src/auth/` owns sessions
+(memory + tab `sessionStorage`) and password validation; `src/passenger/` holds
+time/fare formatting and error copy; `src/pages/passenger/` the passenger views; `src/pages/` holds screens; `src/components/`
 contains shared navigation/icons. Server state uses TanStack Query; form state
 stays local. Tests cover API contracts, session races, forms and browser layouts.

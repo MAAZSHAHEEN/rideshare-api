@@ -6,11 +6,9 @@ import { expect, fillLogin, fillRegistration, mockSignedIn, test } from './fixtu
 // Serious and critical violations fail the test; every violation, at any impact,
 // is attached to the report as JSON so it can be triaged.
 // Known, documented exceptions (handover/tasks/AST-009.md). Keep this list empty
-// unless a violation is reviewed and deferred with a reason.
-// - color-contrast: fixed by AST-004 (branch fix/frontend-copy-contrast, styles.css).
-//   With that change applied, these pages report zero violations. Remove this
-//   entry when AST-004 is merged so contrast regressions fail CI again.
-const KNOWN_EXCEPTIONS: string[] = ['color-contrast'];
+// unless a violation is reviewed and deferred with a reason. The former
+// color-contrast exception is gone: this branch includes AST-004 (PR #4).
+const KNOWN_EXCEPTIONS: string[] = [];
 
 async function audit(page: Page, testInfo: TestInfo, name: string) {
   const results = await new AxeBuilder({ page })
