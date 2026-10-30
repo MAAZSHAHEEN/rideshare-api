@@ -399,6 +399,32 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.assert_metadata_matches(self.task8_metadata(), "d924a6e38f10")
                 self.assertEqual(await fk_indexes(), {"rides": {}, "bookings": {}})
 
+    async def test_fk_index_upgrade_reruns_and_repairs_interrupted_builds(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        # Simulate an interrupted run: one index finished, one left INVALID by
+        # a failed CREATE INDEX CONCURRENTLY, one never started.
+        await self.execute_sql(
+            "CREATE INDEX ix_bookings_passenger_id_id ON bookings (passenger_id, id)")
+        await self.execute_sql(
+            "CREATE INDEX ix_rides_driver_id_departure_time_id ON rides (driver_id, departure_time, id)")
+        await self.execute_sql("""
+            UPDATE pg_index SET indisvalid = false
+            WHERE indexrelid = 'ix_rides_driver_id_departure_time_id'::regclass
+        """)
+        await self.run_python("-m", "alembic", "upgrade", "e3a7c41b9f52")
+        await self.assert_metadata_matches()
+        async with self.engine.connect() as connection:
+            rows = (await connection.execute(text("""
+                SELECT c.relname, i.indisvalid FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indexrelid
+                WHERE c.relname IN ('ix_rides_driver_id_departure_time_id',
+                                    'ix_bookings_passenger_id_id', 'ix_bookings_ride_id_id')
+                ORDER BY c.relname
+            """))).all()
+        self.assertEqual(rows, [("ix_bookings_passenger_id_id", True),
+                                ("ix_bookings_ride_id_id", True),
+                                ("ix_rides_driver_id_departure_time_id", True)])
+
     async def test_invalid_existing_data_aborts_migration_without_rewriting_rows(self):
         await self.prepare_integrity_data("50872040220b")
         cases = (
