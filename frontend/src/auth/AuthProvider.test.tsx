@@ -16,7 +16,9 @@ function Probe() {
     <button onClick={auth.logout}>Logout</button>
     <button onClick={() => auth.selectMode("passenger")}>Passenger Mode</button>
     <button onClick={() => auth.selectMode("driver")}>Driver Mode</button>
-    <button onClick={() => void auth.api.myBookings(0).catch(() => {})}>Fetch</button></>;
+    <button onClick={() => void auth.api.myBookings(0).catch(() => {})}>Fetch</button>
+    <p>{auth.restoreFailed ? 'Restore failed' : auth.restoring ? 'Restoring' : 'Settled'}</p>
+    <button onClick={auth.retryRestore}>Retry restore</button></>;
 }
 function mount() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -143,14 +145,21 @@ describe('verified sessions', () => {
     await act(async () => { finish(json({ detail: 'Invalid token' }, 401)); });
     expect(screen.getByText('New user:passenger')).toBeInTheDocument();
   });
-  it('expires an idle session using the JWT expiry timer', async () => {
-    const expiry = Math.floor(Date.now() / 1000) + 3600;
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ access_token: `h.${btoa(JSON.stringify({ exp: expiry }))}.s`, token_type: 'bearer' })).mockResolvedValueOnce(json(user)));
+  it('expires an idle session using the expiry timer (monotonic clock, server lifetime exp − iat)', async () => {
+    const iat = Math.floor(Date.now() / 1000);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ access_token: `h.${btoa(JSON.stringify({ iat, exp: iat + 3600 }))}.s`, token_type: 'bearer' })).mockResolvedValueOnce(json(user)));
     const client = mount();
     await userEvent.click(screen.getByText('Login'));
     await screen.findByText('Ayesha:passenger');
     client.setQueryData(['private'], 'secret');
-    vi.spyOn(Date, 'now').mockReturnValue((expiry + 1) * 1000);
+    // D-RC-1: the wall clock alone moving past exp does not expire the session…
+    const wall = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(wall + 3_601_000);
+    act(() => window.dispatchEvent(new Event('focus')));
+    expect(screen.getByText('Ayesha:passenger')).toBeInTheDocument();
+    // …the monotonic clock passing the server lifetime does.
+    const mono = performance.now();
+    vi.spyOn(performance, 'now').mockReturnValue(mono + 3_601_000);
     act(() => window.dispatchEvent(new Event('focus')));
     expect(screen.getByText('Signed out')).toBeInTheDocument();
     expect(client.getQueryCache().getAll()).toHaveLength(0);
@@ -178,13 +187,14 @@ describe('tab session persistence (AST-023)', () => {
     await userEvent.click(screen.getByText('Fetch'));
     expect(fetcher.mock.calls[1][1].headers.Authorization).toBe(`Bearer ${saved}`);
   });
-  it('drops an expired saved token without any network call', async () => {
+  it('a saved token whose expiry hint has passed is still checked with the server; its 401 shows the expiry message', async () => {
     const expired = `h.${btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 5 }))}.s`;
-    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: expired, expiresAt: Date.now() + 999_999, mode: 'passenger' }));
-    vi.stubGlobal('fetch', vi.fn());
+    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: expired, receivedAt: Date.now() - 3_700_000, mode: 'passenger' }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ detail: 'Invalid token' }, 401)));
     mountProbe();
+    expect(await screen.findByText('Your session has expired. Please sign in again.')).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Signed out')).toBeInTheDocument();
-    expect(fetch).not.toHaveBeenCalled();
     expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull();
   });
   it.each(['not json', '{"token":5}', '[]', 'null'])('drops malformed saved data %s', async raw => {
@@ -217,12 +227,14 @@ describe('tab session persistence (AST-023)', () => {
       expect(screen.queryByText(/couldn’t restore your session/)).toBeNull();
     } finally { resetPageUnloadingForTests(); }
   });
-  it('a network failure during restore (page not unloading) still clears the session with a message', async () => {
-    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: token(), expiresAt: 1, mode: null }));
+  it('a network failure during restore keeps the saved session and shows the retry state (D-RC-2)', async () => {
+    const saved = JSON.stringify({ token: token(), receivedAt: Date.now(), mode: null });
+    window.sessionStorage.setItem(SESSION_KEY, saved);
     vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch')));
     mountProbe();
-    expect(await screen.findByText('We couldn’t restore your session. Please sign in again.')).toBeInTheDocument();
-    expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull();
+    expect(await screen.findByText('Restore failed')).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(SESSION_KEY)).toBe(saved);
+    expect(screen.queryByText(/sign in again/)).toBeNull();
   });
   it('does not trust a saved profile that fails validation', async () => {
     window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: token(), expiresAt: 1, mode: null }));
