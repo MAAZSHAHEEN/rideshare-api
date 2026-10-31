@@ -36,10 +36,12 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.drop_schema)
         async with AsyncSession(self.engine, expire_on_commit=False) as db:
             self.users = {}
-            for name, role in (("driver", UserRole.driver), ("other_driver", UserRole.driver),
-                               ("passenger", UserRole.passenger), ("other_passenger", UserRole.passenger),
-                               ("admin", UserRole.admin)):
-                user = User(name=name, email=f"{name}@example.com", cnic=name,
+            for index, (name, role) in enumerate((
+                    ("driver", UserRole.driver), ("other_driver", UserRole.driver),
+                    ("passenger", UserRole.passenger), ("other_passenger", UserRole.passenger),
+                    ("admin", UserRole.admin))):
+                # Obviously fake 13-digit CNICs so duplicate checks can resubmit them.
+                user = User(name=name, email=f"{name}@example.com", cnic=f"{index:013d}",
                             phone_number="private-phone", password="private-hash", role=role)
                 db.add(user)
                 self.users[name] = user
@@ -313,7 +315,7 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
         for existing_role, new_role in (("passenger", "driver"), ("driver", "passenger")):
             existing = self.users[existing_role]
             for field in ("cnic", "email"):
-                payload = dict(name="Duplicate", email="new@example.com", cnic="new-cnic",
+                payload = dict(name="Duplicate", email="new@example.com", cnic="00000-0000099-9",
                                phone_number="03000000000", password="valid-test-password", role=new_role)
                 payload[field] = getattr(existing, field)
                 response = await self.client.post("/auth/register", json=payload)

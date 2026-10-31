@@ -4,6 +4,8 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from schemas import BLANK_ERROR, CNIC_ERROR, CONTROL_CHAR_ERROR, PHONE_ERROR, SAME_PLACE_ERROR
+
 
 # Generate messages from trusted text rather than validator exceptions: even msg
 # can contain input (email errors, custom validators, discriminated unions).
@@ -36,9 +38,15 @@ _BOUNDS = {
     "less_than": ("lt", "Input should be less than {}"),
     "less_than_equal": ("le", "Input should be less than or equal to {}"),
 }
-_PASSWORD_MESSAGES = {
+# Exact fixed messages raised by our own validators (see schemas.py). Anything
+# else falls back to a generic message, so a validator that interpolates input
+# can never leak it.
+_SAFE_VALUE_ERRORS = {
     "Value error, Password must not be blank",
     "Value error, Password must be at most 72 UTF-8 bytes",
+    *(f"Value error, {message}" for message in (
+        CNIC_ERROR, PHONE_ERROR, BLANK_ERROR, CONTROL_CHAR_ERROR, SAME_PLACE_ERROR,
+    )),
 }
 
 
@@ -46,7 +54,7 @@ def _message(error: dict) -> str:
     kind = error["type"]
     if kind == "value_error":
         message = error.get("msg", "")
-        if message in _PASSWORD_MESSAGES:
+        if message in _SAFE_VALUE_ERRORS:
             return message
         if message.startswith("value is not a valid email address"):
             return "Value is not a valid email address"

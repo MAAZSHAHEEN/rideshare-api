@@ -17,6 +17,7 @@ with patch.dict(os.environ, {
     from database import get_db
 
 from validation_errors import request_validation_error_handler
+from schemas import CNIC_ERROR, PHONE_ERROR
 
 
 class NestedInput(BaseModel):
@@ -108,8 +109,12 @@ class ValidationPrivacyTests(unittest.IsolatedAsyncioTestCase):
         })
         errors = self.assert_safe(response, ["private-role-marker", "private-password-marker",
                                              "private-cnic-marker", "private-phone-marker"])
-        self.assertEqual(errors, [{"type": "literal_error", "loc": ["body", "role"],
-                                   "msg": "Input should be one of the permitted values"}])
+        self.assertEqual(errors, [
+            {"type": "value_error", "loc": ["body", "cnic"], "msg": "Value error, " + CNIC_ERROR},
+            {"type": "value_error", "loc": ["body", "phone_number"], "msg": "Value error, " + PHONE_ERROR},
+            {"type": "literal_error", "loc": ["body", "role"],
+             "msg": "Input should be one of the permitted values"},
+        ])
 
     async def test_query_bounds_keep_useful_messages(self):
         isolated = FastAPI()
