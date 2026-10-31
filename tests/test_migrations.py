@@ -679,7 +679,9 @@ with patch.object(MetaData, 'create_all', side_effect=AssertionError('startup ca
 
     async def table_rows(self):
         # Legacy columns only, so rows compare across revisions that add columns.
-        columns = {"users": "*", "rides": "*",
+        columns = {"users": "id, name, email, password, cnic, phone_number, role::text, "
+                            "created_at, updated_at",
+                   "rides": "*",
                    "bookings": "id, ride_id, passenger_id, status::text, created_at"}
         async with self.engine.connect() as connection:
             return {table: (await connection.execute(text(

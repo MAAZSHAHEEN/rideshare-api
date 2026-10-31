@@ -556,11 +556,11 @@ class SuspensionRaceTests(SuspensionTestBase):
                 held_on_keys = await conn.scalar(text(
                     "SELECT count(*) FROM pg_locks WHERE pid = :pid "
                     "AND relation = 'idempotency_keys'::regclass"), {"pid": waiting_pid})
-            self.assertEqual(held_on_keys, 0, "idempotency key claimed before the user lock")
             await admin_db.commit()
             with self.assertRaises(HTTPException) as raised:
                 await book
             self.assertEqual(raised.exception.status_code, 401)
+            self.assertEqual(held_on_keys, 0, "idempotency key claimed before the user lock")
         async with self.session() as db:
             self.assertEqual(await db.scalar(select(IdempotencyKey.key)), None)
             self.assertEqual(await db.scalar(select(Booking.id).where(Booking.ride_id == ride)), None)
