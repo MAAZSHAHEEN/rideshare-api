@@ -61,8 +61,9 @@ class RideTests(unittest.IsolatedAsyncioTestCase):
         overrides = patch.dict(app.dependency_overrides, {get_db: override_get_db})
         overrides.start()
         self.addCleanup(overrides.stop)
-        clock = patch("services.rides.datetime")
-        clock.start().now.return_value = NOW
+        # Ride creation and search read the shared lifecycle clock (clock.py).
+        clock = patch("clock.utc_now", return_value=NOW)
+        clock.start()
         self.addCleanup(clock.stop)
         self.client = AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
         self.addAsyncCleanup(self.client.aclose)
@@ -137,16 +138,19 @@ class RideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.search(), [future])
         self.assertEqual(await self.search(departure_from=(NOW - timedelta(days=1)).isoformat()), [future])
 
-    async def test_exact_location_filters_individually_and_combined(self):
+    async def test_location_filters_trimmed_case_insensitive_individually_and_combined(self):
+        # G3 (API gaps): whole-value match after trimming and case-folding on
+        # both sides. Previously exact and case-sensitive (deliberate change).
         first = await self.seed()
         second = await self.seed(destination="Lahore")
         third = await self.seed(origin="Lahore")
-        await self.seed(origin="peshawar", destination="islamabad")
-        self.assertEqual(await self.search(origin="Peshawar"), [first, second])
-        self.assertEqual(await self.search(destination="Islamabad"), [first, third])
-        self.assertEqual(await self.search(origin="Peshawar", destination="Islamabad"), [first])
+        fourth = await self.seed(origin="peshawar", destination="islamabad")
+        self.assertEqual(await self.search(origin="Peshawar"), [first, second, fourth])
+        self.assertEqual(await self.search(destination="Islamabad"), [first, third, fourth])
+        self.assertEqual(await self.search(origin="Peshawar", destination="Islamabad"), [first, fourth])
         self.assertEqual(await self.search(origin="Pesh"), [])
-        self.assertEqual(await self.search(origin=" Peshawar"), [])
+        self.assertEqual(await self.search(origin=" Peshawar"), [first, second, fourth])
+        self.assertEqual(await self.search(origin="PESHAWAR\t", destination=" islamabad "), [first, fourth])
         # Filtering precedes offset and limit, not the other way around.
         self.assertEqual(await self.search(destination="Islamabad", offset=1, limit=1), [third])
 

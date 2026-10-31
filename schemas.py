@@ -95,3 +95,12 @@ class PassengerBookingResponse(BookingResponse):
 
 class DriverBookingResponse(BookingResponse):
     passenger: PassengerSummary
+
+
+class RideBookingCounts(BaseModel):
+    """Booking counts by status for one of the driver's rides (D2)."""
+    ride_id:   int
+    pending:   int
+    accepted:  int
+    rejected:  int
+    cancelled: int

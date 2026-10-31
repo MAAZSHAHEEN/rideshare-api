@@ -1,10 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models import BookingStatus, User
+from pagination import TOTAL_COUNT_HEADER, with_total
 from routers.dependencies import get_current_user
 from schemas import BookingResponse, PassengerBookingResponse
 from services import bookings as booking_service
@@ -12,17 +13,19 @@ from services import bookings as booking_service
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
 
-@router.get("/me", response_model=list[PassengerBookingResponse])
+@router.get("/me", response_model=list[PassengerBookingResponse], responses=TOTAL_COUNT_HEADER)
 async def list_my_bookings(
+    response: Response,
     status: BookingStatus | None = None,
+    ride_id: Annotated[int | None, Query(ge=1, le=2**31 - 1)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return await booking_service.list_my_bookings(
-        db, current_user, status=status, limit=limit, offset=offset,
-    )
+    return with_total(response, await booking_service.list_my_bookings(
+        db, current_user, status=status, ride_id=ride_id, limit=limit, offset=offset,
+    ))
 
 
 @router.patch("/{booking_id}/cancel", response_model=BookingResponse)
