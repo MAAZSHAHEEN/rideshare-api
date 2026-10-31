@@ -924,9 +924,18 @@ class ClockRaceTests(StressBase):
             status = await self.booking_status(b)
             if side < 0:
                 self.assertEqual((outcome(accept_result), status), ((200, "ok"), B.accepted))
+                self.assertEqual(sweep_result.expired_requests, 0)
             else:
                 self.assertIn(outcome(accept_result), [(409, lifecycle.BOOKING_EXPIRED),
                                                        (409, lifecycle.ALREADY_RESPONDED)])
+                if status == B.pending:
+                    # The sweep met the ride locked by the (failing) accept and skipped it
+                    # (SKIP LOCKED, by design); the request stays lazily expired until the
+                    # next run, which must persist it.
+                    self.assertEqual(sweep_result.rides_skipped_locked, 1)
+                    self.assertEqual((await sweep(expires + eps)).expired_requests, 1)
+                    status = await self.booking_status(b)
+                    self.outcomes[("round", side, "sweep_skipped_locked")] += 1
                 self.assertEqual(status, B.expired)
             self.outcomes[("round", side) + outcome(accept_result)] += 1
         self.check_now = frozen.now
