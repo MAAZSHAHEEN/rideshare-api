@@ -112,7 +112,7 @@ Rules for every admin endpoint:
 3. An admin may not act on their own account (403).
 4. Read endpoints return masked CNIC/phone (`privacy.mask_*`). Full values only through `POST /admin/users/{id}/reveal-pii` with a reason, audited, rate-limited (e.g. 20/day per admin).
 5. Pagination limits match the public API (`limit ≤ 100`).
-6. Admin accounts are created only by an operator script (`python -m scripts.grant_admin --user-id N`, which writes an audit row with `actor = NULL`, `action = admin_granted`). Running it on production is an approval-gated production write.
+6. Admin accounts are created only by an operator script: `python -m scripts.grant_admin` (built on `feat/admin-bootstrap`; email-based, `--bootstrap` only while zero admins exist, later grants need an existing admin's password; audit row `admin_granted`/`admin_revoked`, `actor_id = NULL` + `metadata.actor = system:bootstrap` for bootstrap). See `docs/security/ADMIN_BOOTSTRAP.md`. Running it on production is an approval-gated production write.
 
 Proposed endpoints (each its own PR, in this order):
 

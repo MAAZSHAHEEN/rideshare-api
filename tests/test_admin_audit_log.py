@@ -11,7 +11,7 @@ from sqlalchemy.exc import DBAPIError
 from tests.test_account_suspension import REASON, SuspensionTestBase
 
 import audit
-from models import AdminAuditLog, BookingStatus, RideStatus
+from models import AdminAuditLog, BookingStatus, RideStatus, UserRole
 from routers.dependencies import ADMIN_FORBIDDEN_DETAIL
 
 
@@ -46,12 +46,14 @@ class AuditWriteTests(AuditTestBase):
         self.assertEqual(suspend.reason, REASON["reason"])
         self.assertEqual(suspend.details, {
             "previous_status": "active", "new_status": "suspended", "token_version": 1,
+            "target_role": UserRole(target.role).value,
             "cancelled_ride_ids": [ride], "cancelled_booking_ids": [booking],
             "expired_booking_ids": [], "departed_active_ride_ids": [],
         })
         self.assertEqual(reinstate.reason, "Appeal accepted")  # stored trimmed
         self.assertEqual(reinstate.details, {"previous_status": "suspended",
-                                             "new_status": "active", "token_version": 2})
+                                             "new_status": "active", "token_version": 2,
+                                             "target_role": UserRole(target.role).value})
         for row in rows:
             self.assertIsNotNone(row.created_at)
             dumped = json.dumps(row.details) + (row.reason or "")

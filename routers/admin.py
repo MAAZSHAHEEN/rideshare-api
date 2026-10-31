@@ -17,7 +17,6 @@ row through audit.record() in the same transaction as the action itself.
 """
 
 from datetime import datetime
-import re
 
 from typing import Any
 
@@ -34,15 +33,9 @@ from routers.dependencies import require_admin
 from services import accounts as account_service
 
 ADMIN_PREFIX = "/admin"
-REASON_MIN_LENGTH = 3
-REASON_MAX_LENGTH = 500
+REASON_MIN_LENGTH = audit.REASON_MIN_LENGTH
+REASON_MAX_LENGTH = audit.REASON_MAX_LENGTH
 USER_ID = Path(ge=1, le=2**31 - 1)
-
-# Seven or more digits, allowing the separators people type in CNICs and
-# phone numbers. A reason is stored and shown to other admins; it must not
-# become a second copy of someone's identity or contact number.
-_LONG_DIGIT_RUN = re.compile(r"[0-9](?:[\s\-./]*[0-9]){6,}")
-
 
 def admin_router(prefix: str = "", **kwargs) -> APIRouter:
     """Build a router whose every route requires an authenticated admin."""
@@ -64,14 +57,7 @@ class AccountStatusChange(BaseModel):
     @field_validator("reason")
     @classmethod
     def _reason_is_meaningful_and_pii_free(cls, value: str) -> str:
-        value = value.strip()
-        if len(value) < REASON_MIN_LENGTH:
-            raise ValueError("Reason is required")
-        if any(ord(char) < 32 and char not in "\n\t" for char in value):
-            raise ValueError("Reason contains control characters")
-        if _LONG_DIGIT_RUN.search(value):
-            raise ValueError("Reason must not contain ID or phone numbers")
-        return value
+        return audit.validate_reason(value)
 
 
 class AdminUserResponse(BaseModel):
@@ -137,6 +123,8 @@ async def suspend_user(
             db, actor_id=admin.id, action="user.suspend", target_type="user",
             target_id=user.id, reason=change.reason, metadata={
                 "previous_status": "active", "new_status": user.account_status,
+                # Admin-on-admin suspension is allowed (D-TF-1) and must be visible.
+                "target_role": UserRole(user.role).value,
                 "token_version": user.token_version,
                 "cancelled_ride_ids": effects.cancelled_ride_ids,
                 "cancelled_booking_ids": effects.cancelled_booking_ids,
@@ -171,6 +159,7 @@ async def reinstate_user(
             db, actor_id=admin.id, action="user.reinstate", target_type="user",
             target_id=user.id, reason=change.reason, metadata={
                 "previous_status": "suspended", "new_status": user.account_status,
+                "target_role": UserRole(user.role).value,
                 "token_version": user.token_version,
             },
         )

@@ -16,13 +16,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import AdminAuditLog
 
-ACTIONS = frozenset({"user.view", "user.suspend", "user.reinstate"})
+ACTIONS = frozenset({
+    "user.view", "user.suspend", "user.reinstate",
+    # Written only by the operator CLI (python -m scripts.grant_admin); there is
+    # deliberately no HTTP route that changes a role (docs/security/ADMIN_BOOTSTRAP.md).
+    "admin_granted", "admin_revoked",
+})
 TARGET_TYPES = frozenset({"user"})
 REASON_MAX_LENGTH = 500
 
 _KEY = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _PII_KEY = re.compile(r"cnic|phone|email|name|password|address|national|token(?!_version)|dob|birth")
-_CODE = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
+_CODE = re.compile(r"[a-z][a-z0-9_.:-]{0,63}")  # ':' for actor codes like system:bootstrap
+REASON_MIN_LENGTH = 3
+# Seven or more digits, allowing the separators people type in CNICs and
+# phone numbers. A reason is stored and shown to other admins; it must not
+# become a second copy of someone's identity or contact number.
+_LONG_DIGIT_RUN = re.compile(r"[0-9](?:[\s\-./]*[0-9]){6,}")
+
+
+def validate_reason(value: str) -> str:
+    """Trim and check a free-text admin reason (API body and operator CLI alike)."""
+    if type(value) is not str:
+        raise ValueError("Reason is required")
+    value = value.strip()
+    if len(value) < REASON_MIN_LENGTH:
+        raise ValueError("Reason is required")
+    if len(value) > REASON_MAX_LENGTH:
+        raise ValueError("Reason is too long")
+    if any(ord(char) < 32 and char not in "\n\t" for char in value):
+        raise ValueError("Reason contains control characters")
+    if _LONG_DIGIT_RUN.search(value):
+        raise ValueError("Reason must not contain ID or phone numbers")
+    return value
 _MAX_LIST = 10_000
 
 
