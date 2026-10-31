@@ -29,6 +29,9 @@ class MockDriverApi {
     { id: 80, ride_id: 8, passenger_id: 104, status: 'pending', passenger: { id: 104, name: 'Dua Test' } },
   ];
   created: unknown[] = [];
+  rideListReads: URL[] = [];
+  countReads: URL[] = [];
+  idempotencyKeys: (string | undefined)[] = [];
   reads: string[] = [];
   overrides = new Map<string, Reply | (() => Promise<Reply>)>();
 
@@ -51,10 +54,25 @@ class MockDriverApi {
     if (!request.headers().authorization?.startsWith('Bearer ')) return this.reply(route, 401, { detail: 'Not authenticated' });
     if (key === 'GET /me') return this.reply(route, 200, this.user);
     if (key === 'GET /rides/me') {
-      const status = url.searchParams.get('status');
-      const rows = this.rides.filter(r => r.driver_id === 42 && (!status || r.status === status)).sort((a, b) => Date.parse(b.departure_time) - Date.parse(a.departure_time));
-      const offset = Number(url.searchParams.get('offset') ?? 0);
-      return this.reply(route, 200, rows.slice(offset, offset + Number(url.searchParams.get('limit') ?? 20)));
+      this.rideListReads.push(url);
+      const q = url.searchParams;
+      const status = q.get('status'), when = q.get('when'), now = Date.now();
+      // D1: when=upcoming|departed on the lifecycle clock, order=asc|desc (default desc); G7 total.
+      const rows = this.rides.filter(r => r.driver_id === 42 && (!status || r.status === status)
+        && (when !== 'upcoming' || Date.parse(r.departure_time) > now) && (when !== 'departed' || Date.parse(r.departure_time) <= now))
+        .sort((a, b) => (Date.parse(b.departure_time) - Date.parse(a.departure_time) || b.id - a.id) * (q.get('order') === 'asc' ? -1 : 1));
+      const offset = Number(q.get('offset') ?? 0);
+      return this.reply(route, 200, rows.slice(offset, offset + Number(q.get('limit') ?? 20)), { 'X-Total-Count': String(rows.length) });
+    }
+    if (key === 'GET /rides/me/booking-counts') {
+      // D2: own rides only, unknown/foreign ids omitted, request order kept.
+      this.countReads.push(url);
+      const ids = [...new Set(url.searchParams.getAll('ride_id').map(Number))];
+      const own = ids.filter(id => this.rides.some(r => r.id === id && r.driver_id === 42));
+      return this.reply(route, 200, own.map(id => {
+        const of = (status: string) => this.bookings.filter(b => b.ride_id === id && b.status === status).length;
+        return { ride_id: id, pending: of('pending'), accepted: of('accepted'), rejected: of('rejected'), cancelled: of('cancelled') };
+      }));
     }
     if (key === 'POST /rides/') {
       const body = request.postDataJSON();
@@ -69,7 +87,7 @@ class MockDriverApi {
       if (!ride) return this.reply(route, 404, { detail: 'Ride not found' });
       if (!match[2] && request.method() === 'GET') return this.reply(route, 200, ride);
       if (ride.driver_id !== 42) return this.reply(route, 403, { detail: 'This is not your ride' });
-      if (match[2] === '/bookings') return this.reply(route, 200, this.bookings.filter(b => b.ride_id === ride.id).slice().reverse());
+      if (match[2] === '/bookings') { const rows = this.bookings.filter(b => b.ride_id === ride.id); return this.reply(route, 200, rows.slice().reverse(), { 'X-Total-Count': String(rows.length) }); }
       if (ride.status !== 'active') return this.reply(route, 409, { detail: 'Ride is not active' });
       for (const b of this.bookings.filter(b => b.ride_id === ride.id)) {
         if (match[2] === '/cancel' && (b.status === 'pending' || b.status === 'accepted')) { if (b.status === 'accepted') ride.available_seats += 1; b.status = 'cancelled'; }
@@ -82,7 +100,10 @@ class MockDriverApi {
     if (match && request.method() === 'PATCH') {
       const booking = this.bookings.find(b => b.id === Number(match![1]));
       if (!booking) return this.reply(route, 404, { detail: 'Booking not found' });
+      this.idempotencyKeys.push(request.headers()['idempotency-key']);
       const ride = this.rides.find(r => r.id === booking.ride_id)!;
+      // D7 (PR #17): withdrawn by the passenger while the ride is active has its own 409.
+      if (booking.status === 'cancelled' && ride.status === 'active') return this.reply(route, 409, { detail: 'Booking was cancelled by the passenger' });
       if (booking.status !== 'pending') return this.reply(route, 409, { detail: 'Booking already responded to' });
       if (ride.status !== 'active') return this.reply(route, 409, { detail: 'Ride is not active' });
       if (url.searchParams.get('accept') === 'true') {
@@ -97,7 +118,7 @@ class MockDriverApi {
   }
 
   private reply(route: Route, status: number, body: unknown, headers: Record<string, string> = {}) {
-    return route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Retry-After', ...headers }, body: JSON.stringify(body) });
+    return route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Retry-After, X-Total-Count', ...headers }, body: JSON.stringify(body) });
   }
 }
 
@@ -189,7 +210,9 @@ test.describe('driver journey (mocked API)', () => {
   });
 
   const conflicts: [string, string, RegExp][] = [
-    ['already responded', 'Booking already responded to', /already answered, or the passenger withdrew it/],
+    ['already responded', 'Booking already responded to', /^This request was already answered\. The list has been refreshed/],
+    ['withdrawn by the passenger (D7)', 'Booking was cancelled by the passenger', /^The passenger withdrew this request, so it can’t be answered\./],
+    ['expired (#20)', 'Booking request has expired', /^This request expired before it was answered/],
     ['insufficient seats', 'No seats available', /No seats are left on this ride/],
     ['departed', 'Ride has already departed', /already departed, so requests can no longer be accepted/],
     ['concurrent conflict', 'could not serialize access', /changed at the same time/],
@@ -221,6 +244,70 @@ test.describe('driver journey (mocked API)', () => {
     await expect(page.getByRole('alert')).toContainText('already answered');
     await expect(page.getByRole('heading', { name: 'Rejected (1)' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Accept request from Asha Test' })).toHaveCount(0);
+  });
+
+  test('D7 real race: the passenger withdrew before the driver accepted → specific copy, refreshed list', async ({ page }) => {
+    const api = new MockDriverApi();
+    await signIn(page, api);
+    await page.goto('/driver/rides/7');
+    await expect(page.getByText('2 pending · 0 accepted')).toBeVisible();
+    api.bookings.find(b => b.id === 70)!.status = 'cancelled';
+    await page.getByRole('button', { name: 'Accept request from Asha Test' }).click();
+    await expect(page.getByRole('alert')).toHaveText('The passenger withdrew this request, so it can’t be answered. The list has been refreshed.');
+    await expect(page.getByRole('heading', { name: 'Cancelled (2)' })).toBeVisible();
+    await expect(page.getByText('1 pending · 0 accepted')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Accept request from Asha Test' })).toHaveCount(0);
+  });
+
+  test('my rides: Upcoming/Departed tabs use server filters (D1), totals (G7) and one pending-counts call per page (D2)', async ({ page }) => {
+    const api = new MockDriverApi();
+    // 22 more upcoming rides so Upcoming spans two pages (23 in total).
+    for (let i = 0; i < 22; i += 1) api.rides.push({ id: 200 + i, driver_id: 42, origin: 'Lahore', destination: `Town ${i}`, departure_time: iso(100 + i), available_seats: 2, fare_per_seat: 1000, status: 'active' });
+    api.bookings.push({ id: 90, ride_id: 200, passenger_id: 105, status: 'pending', passenger: { id: 105, name: 'Esa Test' } });
+    await signIn(page, api);
+    await page.goto('/driver/rides?filter=upcoming');
+    await expect(page.getByRole('article')).toHaveCount(20);
+    await expect(page.getByText('Page 1 of 2')).toBeVisible();
+    await expect(page.getByText(/Showing 1–20 of 23 rides\./)).toBeVisible();
+    const upcoming = api.rideListReads.at(-1)!;
+    expect(Object.fromEntries(upcoming.searchParams)).toEqual({ limit: '20', offset: '0', status: 'active', when: 'upcoming', order: 'asc' });
+    // Soonest first, server-ordered.
+    await expect(page.getByRole('article').first()).toHaveAccessibleName('Lahore to Islamabad');
+    await expect(page.getByRole('article', { name: 'Lahore to Islamabad' })).toContainText('2 pending');
+    await expect(page.getByRole('article', { name: 'Lahore to Town 0', exact: true })).toContainText('1 pending');
+    await expect(page.getByRole('article', { name: 'Lahore to Town 1', exact: true })).toContainText('No pending');
+    await expect.poll(() => api.countReads.length).toBe(1);
+    expect(api.countReads[0].searchParams.getAll('ride_id')).toHaveLength(20);
+    await page.getByRole('button', { name: 'Next →' }).click();
+    await expect(page.getByText('Page 2 of 2')).toBeVisible();
+    await expect(page.getByRole('article')).toHaveCount(3);
+    await expect(page.getByRole('button', { name: 'Next →' })).toBeDisabled();
+    await expect.poll(() => api.countReads.length).toBe(2);
+    await page.getByRole('button', { name: 'Departed', exact: true }).click();
+    await expect(page.getByRole('article')).toHaveCount(1);
+    await expect(page.getByRole('article', { name: 'Islamabad to Lahore' })).toContainText('1 pending');
+    expect(Object.fromEntries(api.rideListReads.at(-1)!.searchParams)).toEqual({ limit: '20', offset: '0', status: 'active', when: 'departed' });
+    await page.reload();
+    await expect(page).toHaveURL('/driver/rides?filter=departed');
+    await expect(page.getByRole('article', { name: 'Islamabad to Lahore' })).toBeVisible();
+  });
+
+  test('driver overview shows pending badges from one counts call', async ({ page }) => {
+    const api = new MockDriverApi();
+    await signIn(page, api);
+    await expect(page.getByText('2 pending')).toBeVisible();
+    await expect.poll(() => api.countReads.length).toBe(1);
+  });
+
+  test('accept/reject send Idempotency-Key only when same-origin (production bundle)', async ({ page, baseURL }) => {
+    const api = new MockDriverApi();
+    await signIn(page, api);
+    await page.goto('/driver/rides/7');
+    await page.getByRole('button', { name: 'Accept request from Asha Test' }).click();
+    await expect(page.getByText('1 seat left')).toBeVisible();
+    const sameOrigin = new URL(baseURL!).origin === new URL(apiOrigin).origin;
+    if (sameOrigin) expect(api.idempotencyKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    else expect(api.idempotencyKeys).toEqual([undefined]);
   });
 
   test('departed ride: no accept, reject allowed, complete with confirm', async ({ page }) => {

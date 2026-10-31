@@ -19,6 +19,13 @@ Production builds always enforce relative, same-origin API requests, ignoring
 shell and local-file API overrides. The variable is public configuration, not a place for credentials.
 Restart Vite after changing it.
 
+`VITE_SEND_IDEMPOTENCY_KEY` (optional, development only): the app sends an
+`Idempotency-Key` header (PR #18) on "Request a seat" and on accept/reject. Same-origin
+requests (every production bundle served by FastAPI) always send it; a split-origin
+dev build sends it only when this is `true`, because the backend's CORS
+`allow_headers` must list `Idempotency-Key` first (PR #18 adds it; this stack does
+not). See `docs/frontend/API_ADOPTION.md`.
+
 Run the existing backend from the repository root with its usual database and
 JWT environment settings. Add this process environment variable (PowerShell):
 
@@ -81,6 +88,11 @@ Screenshots are saved under ignored `test-results/`.
   a driver registers and publishes in the browser, two passengers (separate
   browser contexts) request seats, the driver accepts one (seats drop) and
   rejects the other.
+- `e2e/adoption-live.spec.ts`: opt-in Milestone B demo on a disposable backend:
+  publish → case-insensitive search → request → driver pending count → accept →
+  passenger sees "accepted" after reload → second passenger withdraws (D7 copy) →
+  third rejected → seat accounting; pagination totals over 21 seeded rides; reload
+  and deep link on every passenger and driver route against the served bundle.
 - `e2e/live-backend.spec.ts`, `e2e/passenger-live.spec.ts`: opt-in contract
   checks against a local FastAPI serving `dist/` on a disposable database (the
   passenger one seeds a ride as a driver through the API, then books and cancels
@@ -111,15 +123,16 @@ Playwright download is unavailable (for example linux-arm64). Never point
   Client checks mirror the server's ride rules, but the API stays authoritative
   for driver capability, ownership, seats and departure. No driver verification
   exists, so the UI says "Driver documents not verified" and never "verified".
-- Passenger journey (AST-023): `/passenger?view=search` (from, to, date filters
-  in the URL), `/passenger?ride=<id>` (details + request a seat),
-  `/passenger?view=bookings[&status=…]` (grouped by status, cancel with
-  confirmation). Views use query parameters because the backend serves only the
-  exact `/passenger` client path (see `frontend_serving.CLIENT_PATHS`).
+- Passenger journey (AST-023): `/passenger/search[?from&to&date&page]`,
+  `/passenger/rides/<id>` (details + request a seat; your booking for the ride via
+  `GET /bookings/me?ride_id=`), `/passenger/bookings[?status=…&page]` (grouped by
+  status with server-total tab counts, cancel with confirmation). Real paths, like
+  the driver's; the old `/passenger?view=…` and `/passenger?ride=…` links redirect.
   Departure times are always shown in Pakistan time (Asia/Karachi, "PKT"),
   fares in PKR. The date filter is a PKT calendar day sent as
-  `departure_from`/`departure_before` with `+05:00`. Place names match exactly
-  (server behaviour).
+  `departure_from`/`departure_before` with `+05:00`. Place names are whole-value,
+  case-insensitive and trimmed (server behaviour, PR #17). Lists page with the
+  server's `X-Total-Count` (falls back to the page-size heuristic without it).
 - Registration sends name, email, password, CNIC, phone number and initial role;
   both modes are included. It redirects to login. No token is assumed from registration.
 - Passwords are preserved exactly. New passwords require 12 Unicode characters,

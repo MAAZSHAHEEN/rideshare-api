@@ -18,9 +18,12 @@ class MockApi {
   ];
   bookings: Booking[] = [];
   searches: URL[] = [];
+  bookingReads: URL[] = [];
+  idempotencyKeys: (string | undefined)[] = [];
   /** Per "METHOD /path" one-shot or persistent override. */
   overrides = new Map<string, Reply | (() => Promise<Reply>)>();
   meStatus = 200;
+  onRequest?: (key: string, headers: Record<string, string>) => void;
 
   async install(page: Page) {
     await page.route(url => url.origin === new URL(apiOrigin).origin && /^\/(auth\/|me$|rides\/|bookings\/)/.test(url.pathname), route => this.handle(route));
@@ -30,6 +33,7 @@ class MockApi {
     const request = route.request();
     const url = new URL(request.url());
     const key = `${request.method()} ${url.pathname}`;
+    this.onRequest?.(key, request.headers());
     const override = this.overrides.get(key);
     if (override) {
       const reply = typeof override === 'function' ? await override() : override;
@@ -44,10 +48,12 @@ class MockApi {
       this.searches.push(url);
       const q = url.searchParams;
       const from = q.get('departure_from'), before = q.get('departure_before');
+      // G3: trimmed, case-insensitive whole-value match.
+      const place = (value: string, wanted: string | null) => !wanted || value.trim().toLowerCase() === wanted.trim().toLowerCase();
       const found = this.rides.filter(r => r.status === 'active' && r.available_seats >= 1 && Date.parse(r.departure_time) > Date.now()
-        && (!q.get('origin') || r.origin === q.get('origin')) && (!q.get('destination') || r.destination === q.get('destination'))
+        && place(r.origin, q.get('origin')) && place(r.destination, q.get('destination'))
         && (!from || Date.parse(r.departure_time) >= Date.parse(from)) && (!before || Date.parse(r.departure_time) < Date.parse(before)));
-      return this.reply(route, 200, found.slice(Number(q.get('offset') ?? 0), Number(q.get('offset') ?? 0) + Number(q.get('limit') ?? 20)));
+      return this.reply(route, 200, found.slice(Number(q.get('offset') ?? 0), Number(q.get('offset') ?? 0) + Number(q.get('limit') ?? 20)), { 'X-Total-Count': String(found.length) });
     }
     let match = /^\/rides\/(\d+)$/.exec(url.pathname);
     if (match && request.method() === 'GET') {
@@ -55,13 +61,16 @@ class MockApi {
       return ride ? this.reply(route, 200, ride) : this.reply(route, 404, { detail: 'Ride not found' });
     }
     if (key === 'GET /bookings/me') {
+      this.bookingReads.push(url);
       const status = url.searchParams.get('status');
-      const rows = this.bookings.filter(b => !status || b.status === status).slice().reverse()
+      const rideId = url.searchParams.get('ride_id');
+      const rows = this.bookings.filter(b => (!status || b.status === status) && (!rideId || b.ride_id === Number(rideId))).slice().reverse()
         .map(b => ({ ...b, ride: this.rides.find(r => r.id === b.ride_id) }));
-      return this.reply(route, 200, rows.slice(Number(url.searchParams.get('offset') ?? 0), Number(url.searchParams.get('offset') ?? 0) + Number(url.searchParams.get('limit') ?? 20)));
+      return this.reply(route, 200, rows.slice(Number(url.searchParams.get('offset') ?? 0), Number(url.searchParams.get('offset') ?? 0) + Number(url.searchParams.get('limit') ?? 20)), { 'X-Total-Count': String(rows.length) });
     }
     match = /^\/bookings\/(\d+)$/.exec(url.pathname);
     if (match && request.method() === 'POST') {
+      this.idempotencyKeys.push(request.headers()['idempotency-key']);
       const ride = this.rides.find(r => r.id === Number(match![1]));
       if (!ride) return this.reply(route, 404, { detail: 'Ride not found' });
       if (this.bookings.some(b => b.ride_id === ride.id && ['pending', 'accepted'].includes(b.status))) return this.reply(route, 409, { detail: 'You already booked this ride' });
@@ -81,7 +90,7 @@ class MockApi {
   }
 
   private reply(route: Route, status: number, body: unknown, headers: Record<string, string> = {}) {
-    return route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Retry-After', ...headers }, body: JSON.stringify(body) });
+    return route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Retry-After, X-Total-Count', ...headers }, body: JSON.stringify(body) });
   }
 }
 
@@ -102,7 +111,7 @@ test.describe('passenger journey (mocked API)', () => {
     await signIn(page, api);
     await expect(page).toHaveURL('/passenger');
     await main(page).getByRole('link', { name: 'Find a ride' }).first().click();
-    await expect(page).toHaveURL('/passenger?view=search');
+    await expect(page).toHaveURL('/passenger/search');
     await expect(page.getByRole('heading', { name: 'Where are you heading?' })).toBeFocused();
     const day = pktDate(30);
     await page.getByLabel('From', { exact: true }).fill('Lahore');
@@ -118,12 +127,12 @@ test.describe('passenger journey (mocked API)', () => {
     await expect(card).toContainText('3 seats left');
     await expect(card).toContainText(/\b\d{1,2}:\d{2} (am|pm) PKT/);
     await card.getByRole('link', { name: /^View details: Lahore to Islamabad/ }).click();
-    await expect(page).toHaveURL('/passenger?ride=7');
+    await expect(page).toHaveURL('/passenger/rides/7');
     await page.getByRole('button', { name: 'Request a seat' }).click();
     await expect(page.getByRole('status').filter({ hasText: 'Seat requested.' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Request a seat' })).toHaveCount(0);
     await page.getByRole('link', { name: 'View my bookings' }).click();
-    await expect(page).toHaveURL('/passenger?view=bookings');
+    await expect(page).toHaveURL('/passenger/bookings');
     await expect(page.getByRole('heading', { name: 'Pending (1)' })).toBeVisible();
     await page.getByRole('button', { name: /^Cancel booking: Lahore to Islamabad/ }).click();
     const dialog = page.getByRole('alertdialog', { name: 'Cancel this booking?' });
@@ -141,7 +150,7 @@ test.describe('passenger journey (mocked API)', () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
     api.overrides.set('GET /rides/', async () => { await gate; return { status: 503, body: { detail: 'asyncpg pool exhausted' } }; });
     await signIn(page, api);
-    await page.goto('/passenger?view=search');
+    await page.goto('/passenger/search');
     await expect(page.getByText('Looking for rides…')).toBeVisible();
     release();
     await expect(page.getByRole('heading', { name: 'We couldn’t load rides.' })).toBeVisible();
@@ -155,7 +164,7 @@ test.describe('passenger journey (mocked API)', () => {
   test('client-side filter validation blocks past dates and identical places', async ({ page }) => {
     const api = new MockApi();
     await signIn(page, api);
-    await page.goto('/passenger?view=search');
+    await page.goto('/passenger/search');
     await expect(page.getByText(/rides? found/)).toBeVisible();
     const before = api.searches.length;
     await page.getByLabel('From', { exact: true }).fill('Lahore');
@@ -185,7 +194,7 @@ test.describe('passenger journey (mocked API)', () => {
       const api = new MockApi();
       api.overrides.set('POST /bookings/7', reply);
       await signIn(page, api);
-      await page.goto('/passenger?ride=7');
+      await page.goto('/passenger/rides/7');
       await page.getByRole('button', { name: 'Request a seat' }).click();
       const alert = page.getByRole('alert');
       await expect(alert).toHaveText(message);
@@ -198,14 +207,14 @@ test.describe('passenger journey (mocked API)', () => {
     const api = new MockApi();
     api.overrides.set('POST /bookings/7', { status: 401, body: { detail: 'Invalid token' } });
     await signIn(page, api);
-    await page.goto('/passenger?ride=7');
+    await page.goto('/passenger/rides/7');
     await page.getByRole('button', { name: 'Request a seat' }).click();
     await expect(page).toHaveURL('/login');
     await expect(page.getByRole('status')).toHaveText('Your session has ended. Please sign in again.');
     expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
     api.overrides.delete('POST /bookings/7');
     await fillLogin(page);
-    await expect(page).toHaveURL('/passenger?ride=7');
+    await expect(page).toHaveURL('/passenger/rides/7');
     await page.getByRole('button', { name: 'Request a seat' }).click();
     await expect(page.getByText('Seat requested.')).toBeVisible();
   });
@@ -213,21 +222,21 @@ test.describe('passenger journey (mocked API)', () => {
   test('signed-out deep link to a ride signs in and returns there', async ({ page }) => {
     const api = new MockApi();
     await api.install(page);
-    await page.goto('/passenger?ride=8');
+    await page.goto('/passenger/rides/8');
     await expect(page).toHaveURL('/login');
     await fillLogin(page);
-    await expect(page).toHaveURL('/passenger?ride=8');
+    await expect(page).toHaveURL('/passenger/rides/8');
     await expect(page.getByText('1 seat left').first()).toBeVisible();
   });
 
   test('a departed ride is labelled and cannot be booked; a missing ride shows not found', async ({ page }) => {
     const api = new MockApi();
     await signIn(page, api);
-    await page.goto('/passenger?ride=9');
+    await page.goto('/passenger/rides/9');
     await expect(page.getByText('Departed', { exact: true })).toBeVisible();
     await expect(page.getByText('Not available to book.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Request a seat' })).toHaveCount(0);
-    await page.goto('/passenger?ride=404');
+    await page.goto('/passenger/rides/404');
     await expect(page.getByRole('heading', { name: 'Ride not found' })).toBeVisible();
   });
 
@@ -241,7 +250,7 @@ test.describe('passenger journey (mocked API)', () => {
     ];
     api.overrides.set('PATCH /bookings/1/cancel', { status: 409, body: { detail: 'Ride is not active' } });
     await signIn(page, api);
-    await page.goto('/passenger?view=bookings');
+    await page.goto('/passenger/bookings');
     await expect(page.getByRole('heading', { level: 3 })).toHaveText(['Pending (1)', 'Accepted (1)', 'Rejected (1)', 'Cancelled (1)']);
     await expect(page.locator('.booking-group').first().getByText('Departed')).toBeVisible();
     const accepted = page.locator('.booking-group').nth(1);
@@ -260,18 +269,19 @@ test.describe('passenger journey (mocked API)', () => {
     // Rejected and cancelled bookings never offer cancel.
     await expect(page.locator('.booking-group').nth(2).getByRole('button', { name: /^Cancel booking/ })).toHaveCount(0);
     await expect(page.locator('.booking-group').nth(3).getByRole('button', { name: /^Cancel booking/ })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Rejected', exact: true }).click();
-    await expect(page).toHaveURL('/passenger?view=bookings&status=rejected');
+    await page.getByRole('button', { name: /^Rejected/ }).click();
+    await expect(page).toHaveURL('/passenger/bookings?status=rejected');
     await expect(page.getByRole('article')).toHaveCount(1);
   });
 
   test('session survives a reload on a passenger view; logout clears it', async ({ page }) => {
     const api = new MockApi();
     await signIn(page, api);
-    await page.goto('/passenger?view=search&from=Lahore');
+    await page.goto('/passenger/search?from=Lahore');
     await expect(page.getByLabel('From', { exact: true })).toHaveValue('Lahore');
     await page.reload();
-    await expect(page).toHaveURL('/passenger?view=search&from=Lahore');
+    await expect(page.getByRole('heading', { name: 'Where are you heading?' })).toBeFocused();
+    await expect(page).toHaveURL('/passenger/search?from=Lahore');
     await expect(page.getByLabel('From', { exact: true })).toHaveValue('Lahore');
     await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Log out' }).click();
     await expect(page).toHaveURL('/login');
@@ -279,8 +289,119 @@ test.describe('passenger journey (mocked API)', () => {
     await fillLogin(page);
     await expect(page).toHaveURL('/passenger');
     await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Log out' }).click();
-    await page.goto('/passenger?view=search');
+    await page.goto('/passenger/search');
     await expect(page).toHaveURL('/login');
+  });
+
+  test('search totals (G7) and case-insensitive places (G3): "LAHORE " finds "Lahore", Page X of Y', async ({ page }) => {
+    const api = new MockApi();
+    for (let i = 0; i < 22; i += 1) api.rides.push({ id: 300 + i, driver_id: 9, origin: 'Lahore', destination: 'Islamabad', departure_time: iso(60 + i), available_seats: 2, fare_per_seat: 1500, status: 'active' });
+    // Another route, so the unfiltered total (25) differs from the filtered one (24).
+    api.rides.push({ id: 400, driver_id: 9, origin: 'Multan', destination: 'Lahore', departure_time: iso(70), available_seats: 2, fare_per_seat: 1500, status: 'active' });
+    await signIn(page, api);
+    await page.goto('/passenger/search');
+    await expect(page.getByText('25 rides found. Showing 1–20.')).toBeVisible();
+    await page.getByLabel('From', { exact: true }).fill('LAHORE ');
+    await page.getByLabel('To', { exact: true }).fill('islamabad');
+    await page.getByRole('button', { name: 'Search rides' }).click();
+    await expect(page.getByText('24 rides found. Showing 1–20.')).toBeVisible();
+    expect(api.searches.at(-1)!.searchParams.get('origin')).toBe('LAHORE');
+    expect(api.searches.at(-1)!.searchParams.get('destination')).toBe('islamabad');
+    await expect(page.getByText('Page 1 of 2')).toBeVisible();
+    await page.getByRole('button', { name: 'Next →' }).click();
+    await expect(page).toHaveURL('/passenger/search?from=LAHORE&to=islamabad&page=1');
+    await expect(page.getByText('24 rides found. Showing 21–24.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Next →' })).toBeDisabled();
+    await page.reload();
+    await expect(page.getByText('24 rides found. Showing 21–24.')).toBeVisible();
+    await expect(page.getByLabel('From', { exact: true })).toHaveValue('LAHORE');
+  });
+
+  test('ride details finds my booking with GET /bookings/me?ride_id= (G2), even beyond the newest 100', async ({ page }) => {
+    const api = new MockApi();
+    api.bookings = [{ id: 1, ride_id: 8, passenger_id: 42, status: 'pending' }];
+    for (let i = 0; i < 120; i += 1) api.bookings.push({ id: 10 + i, ride_id: 7, passenger_id: 42, status: 'cancelled' });
+    await signIn(page, api);
+    await page.goto('/passenger/rides/8');
+    await expect(page.getByText('You’ve already requested a seat on this ride.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Request a seat' })).toHaveCount(0);
+    const lookup = api.bookingReads.find(u => u.searchParams.get('ride_id') === '8')!;
+    expect(Object.fromEntries(lookup.searchParams)).toEqual({ limit: '5', offset: '0', ride_id: '8' });
+    expect(api.bookingReads.some(u => u.searchParams.get('limit') === '100')).toBe(false);
+  });
+
+  test('my bookings: tab counts and pagination use X-Total-Count; expired renders read-only', async ({ page }) => {
+    const api = new MockApi();
+    api.bookings = Array.from({ length: 23 }, (_, i) => ({ id: 1 + i, ride_id: 7, passenger_id: 42, status: i === 0 ? 'expired' : 'rejected' }));
+    await signIn(page, api);
+    await page.goto('/passenger/bookings');
+    await expect(page.getByRole('button', { name: 'All (23)' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Rejected (22)' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Expired (1)' })).toBeVisible();
+    await expect(page.getByText('Page 1 of 2')).toBeVisible();
+    await expect(page.getByText(/Showing 1–20 of 23 bookings\./)).toBeVisible();
+    await page.getByRole('button', { name: 'Next →' }).click();
+    await expect(page).toHaveURL('/passenger/bookings?page=1');
+    await expect(page.getByRole('article')).toHaveCount(3);
+    await expect(page.getByRole('heading', { name: 'Expired (1)' })).toBeVisible();
+    await expect(page.locator('.booking-group').filter({ hasText: 'Expired' }).getByRole('button', { name: /^Cancel/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Next →' })).toBeDisabled();
+  });
+
+  test('request a seat sends an Idempotency-Key only same-origin; a network retry reuses it', async ({ page, baseURL }) => {
+    const api = new MockApi();
+    const keys: (string | undefined)[] = [];
+    let first = true;
+    api.overrides.set('POST /bookings/7', async () => {
+      if (first) { first = false; return 'abort'; }
+      return { status: 201, body: { id: 500, ride_id: 7, passenger_id: 42, status: 'pending' } };
+    });
+    api.onRequest = (key, headers) => { if (key === 'POST /bookings/7') keys.push(headers['idempotency-key']); };
+    await signIn(page, api);
+    await page.goto('/passenger/rides/7');
+    await page.getByRole('button', { name: 'Request a seat' }).click();
+    await expect(page.getByRole('alert')).toHaveText(/Check your connection/);
+    await page.getByRole('button', { name: 'Request a seat' }).click();
+    await expect(page.getByText('Seat requested.')).toBeVisible();
+    const sameOrigin = new URL(baseURL!).origin === new URL(apiOrigin).origin;
+    expect(keys).toHaveLength(2);
+    if (sameOrigin) { expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/); expect(keys[1]).toBe(keys[0]); }
+    else expect(keys).toEqual([undefined, undefined]);
+  });
+
+  test('old query links redirect to the path routes', async ({ page }) => {
+    const api = new MockApi();
+    await signIn(page, api);
+    for (const [from, to] of [
+      ['/passenger?view=search&from=Lahore', '/passenger/search?from=Lahore'],
+      ['/passenger?ride=7', '/passenger/rides/7'],
+      ['/passenger?view=bookings&status=pending', '/passenger/bookings?status=pending'],
+    ]) {
+      await page.goto(from);
+      await expect(page).toHaveURL(to);
+      await expect(page.locator('h1')).toBeVisible();
+    }
+  });
+
+  test('refresh and deep link work on every passenger route', async ({ page }) => {
+    const api = new MockApi();
+    api.bookings = [{ id: 1, ride_id: 7, passenger_id: 42, status: 'pending' }];
+    await signIn(page, api);
+    for (const [path, heading] of [
+      ['/passenger', /^Welcome/], ['/passenger/search?from=Lahore', 'Where are you heading?'], ['/passenger/rides/7', 'Lahore to Islamabad'],
+      ['/passenger/bookings', 'Your seat requests'], ['/passenger/bookings?status=pending', 'Your seat requests'],
+    ] as const) {
+      await page.goto(path);
+      await page.reload();
+      await expect(page).toHaveURL(path);
+      await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();
+    }
+    // A signed-out deep link signs in and returns to the path route.
+    await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Log out' }).click();
+    await page.goto('/passenger/rides/8');
+    await expect(page).toHaveURL('/login');
+    await fillLogin(page);
+    await expect(page).toHaveURL('/passenger/rides/8');
   });
 
   test('a saved session the server rejects on reload signs out cleanly', async ({ page }) => {
@@ -301,7 +422,7 @@ test.describe('passenger journey at 390px', () => {
     const api = new MockApi();
     api.bookings = [{ id: 1, ride_id: 7, passenger_id: 42, status: 'pending' }];
     await signIn(page, api);
-    for (const path of ['/passenger?view=search', '/passenger?ride=7', '/passenger?view=bookings']) {
+    for (const path of ['/passenger/search', '/passenger/rides/7', '/passenger/bookings']) {
       await page.goto(path);
       await expect(page.locator('h1')).toBeVisible();
       await page.waitForLoadState('networkidle');
@@ -316,10 +437,10 @@ test.describe('passenger journey at 390px', () => {
 });
 
 test.describe('passenger accessibility (axe)', () => {
-  for (const [name, path] of [['search', '/passenger?view=search'], ['details', '/passenger?ride=7'], ['bookings', '/passenger?view=bookings']] as const) {
+  for (const [name, path] of [['search', '/passenger/search'], ['details', '/passenger/rides/7'], ['bookings', '/passenger/bookings']] as const) {
     test(`${name} has no serious accessibility violations`, async ({ page }, testInfo) => {
       const api = new MockApi();
-      api.bookings = [{ id: 1, ride_id: 7, passenger_id: 42, status: 'pending' }, { id: 2, ride_id: 8, passenger_id: 42, status: 'rejected' }];
+      api.bookings = [{ id: 1, ride_id: 7, passenger_id: 42, status: 'pending' }, { id: 2, ride_id: 8, passenger_id: 42, status: 'rejected' }, { id: 3, ride_id: 8, passenger_id: 42, status: 'expired' }];
       await signIn(page, api);
       await page.goto(path);
       await expect(page.locator('h1')).toBeVisible();
@@ -352,29 +473,29 @@ test.describe('passenger screenshots', () => {
         await page.evaluate(() => document.fonts.ready.then(() => undefined));
         await page.screenshot({ path: `${screensDir}/${device}-${name}.png`, fullPage: true });
       };
-      await page.goto(`/passenger?view=search&from=Lahore&to=Islamabad`);
+      await page.goto(`/passenger/search?from=Lahore&to=Islamabad`);
       await expect(page.getByText(/rides? found/)).toBeVisible();
       await shot('01-search-results');
-      await page.goto('/passenger?view=search&from=Quetta');
+      await page.goto('/passenger/search?from=Quetta');
       await expect(page.getByText('No rides match yet.')).toBeVisible();
       await shot('02-search-empty');
-      await page.goto('/passenger?ride=7');
+      await page.goto('/passenger/rides/7');
       await expect(page.getByRole('button', { name: 'Request a seat' })).toBeVisible();
       await shot('03-ride-details');
       await page.getByRole('button', { name: 'Request a seat' }).click();
       await expect(page.getByText('Seat requested.')).toBeVisible();
       await shot('04-seat-requested');
-      await page.goto('/passenger?ride=9');
+      await page.goto('/passenger/rides/9');
       await expect(page.getByText('Not available to book.')).toBeVisible();
       await shot('05-ride-departed');
       api.rides.push({ id: 10, driver_id: 9, origin: 'Islamabad', destination: 'Lahore', departure_time: iso(40), available_seats: 1, fare_per_seat: 2400, status: 'active' });
       api.overrides.set('POST /bookings/10', { status: 409, body: { detail: 'No seats available' } });
-      await page.goto('/passenger?ride=10');
+      await page.goto('/passenger/rides/10');
       await page.getByRole('button', { name: 'Request a seat' }).click();
       await expect(page.getByRole('alert')).toBeVisible();
       await shot('06-booking-409-full');
       api.bookings.push({ id: 2, ride_id: 9, passenger_id: 42, status: 'pending' });
-      await page.goto('/passenger?view=bookings');
+      await page.goto('/passenger/bookings');
       await expect(page.getByRole('heading', { name: /Pending/ })).toBeVisible();
       await shot('07-my-bookings');
       await page.getByRole('button', { name: /^Cancel booking/ }).first().click();

@@ -21,6 +21,9 @@ async function mockApi(page: Page, role = 'passenger', options: { failMe?: boole
       status = options.failList ? 503 : 200;
       const ride = { id: 7, driver_id: 42, origin: 'Peshawar', destination: 'Islamabad', departure_time: '2030-06-12T09:00:00Z', available_seats: 2, fare_per_seat: 500, status: 'active' };
       body = options.failList ? { detail: 'Database unavailable' } : options.populated ? (path === '/rides/me' ? [ride] : [{ id: 10, passenger_id: 42, ride_id: 7, status: 'pending', ride }]) : [];
+    } else if (path === '/rides/me/booking-counts') {
+      // D2 (PR #17): the driver overview reads request counts for the rides on the page.
+      body = new URL(route.request().url()).searchParams.getAll('ride_id').map(id => ({ ride_id: Number(id), pending: 0, accepted: 0, rejected: 0, cancelled: 0 }));
     } else throw new Error(`Unexpected API request: ${path}`);
     await route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify(body) });
   });

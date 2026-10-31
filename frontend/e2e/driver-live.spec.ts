@@ -24,7 +24,7 @@ async function passengerRequestsSeat(browser: Browser, email: string, cnic: stri
   await expect(page).toHaveURL('/login');
   await fillLogin(page, email, password);
   await expect(page).toHaveURL('/passenger');
-  await page.goto(`/passenger?ride=${rideId}`);
+  await page.goto(`/passenger/rides/${rideId}`);
   await page.getByRole('button', { name: 'Request a seat' }).click();
   await expect(page.getByText('Seat requested.')).toBeVisible();
   return { context, page };
@@ -95,9 +95,9 @@ test.describe('live disposable backend: driver journey', () => {
     await expect(page.getByText('1 seat left')).toBeVisible();
 
     // Passengers see the driver's answers.
-    await p1.page.goto('/passenger?view=bookings');
+    await p1.page.goto('/passenger/bookings');
     await expect(p1.page.getByRole('heading', { name: 'Accepted (1)' })).toBeVisible();
-    await p2.page.goto('/passenger?view=bookings');
+    await p2.page.goto('/passenger/bookings');
     await expect(p2.page.getByRole('heading', { name: 'Rejected (1)' })).toBeVisible();
 
     // 6. Server truth. Re-answering an already answered request is refused with 409

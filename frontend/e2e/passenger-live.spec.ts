@@ -40,7 +40,7 @@ test.describe('live disposable backend: passenger journey', () => {
     await expect(page).toHaveURL('/passenger');
 
     // Search with all three filters.
-    await page.goto('/passenger?view=search');
+    await page.goto('/passenger/search');
     await page.getByLabel('From', { exact: true }).fill(origin);
     await page.getByLabel('To', { exact: true }).fill(destination);
     await page.getByLabel('Date (PKT)').fill(tomorrowPkt);
@@ -53,13 +53,13 @@ test.describe('live disposable backend: passenger journey', () => {
 
     // Details → request a seat → pending.
     await card.getByRole('link', { name: /^View details/ }).click();
-    await expect(page).toHaveURL(`/passenger?ride=${ride.id}`);
+    await expect(page).toHaveURL(`/passenger/rides/${ride.id}`);
     await page.getByRole('button', { name: 'Request a seat' }).click();
     await expect(page.getByText('Seat requested.')).toBeVisible();
 
     // The tab session survives a reload, and the page knows about the request.
     await page.reload();
-    await expect(page).toHaveURL(`/passenger?ride=${ride.id}`);
+    await expect(page).toHaveURL(`/passenger/rides/${ride.id}`);
     await expect(page.getByText('You’ve already requested a seat on this ride.', { exact: false })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Request a seat' })).toHaveCount(0);
 

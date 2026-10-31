@@ -168,6 +168,12 @@ describe('my bookings totals, cut-off and expired', () => {
     expect(await screen.findByRole('button', { name: 'Pending (1)' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Expired/ })).toBeNull();
   });
+  it('without X-Total-Count (older backend) the core tabs stay, uncounted, and Expired stays hidden', async () => {
+    renderPassenger('/passenger/bookings', { 'GET /bookings/me': () => json(rows()) });
+    expect(await screen.findByRole('heading', { name: 'Expired (1)' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole('button', { pressed: false }).map(b => b.textContent)).toEqual(['Pending', 'Accepted', 'Rejected', 'Cancelled']));
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+  });
   it('an accepted seat can’t be cancelled at or after departure; a pending request still can', () => {
     const now = Date.parse('2030-06-12T04:30:00Z');
     const at = ride({ departure_time: '2030-06-12T04:30:00Z' });
