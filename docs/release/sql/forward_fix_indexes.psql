@@ -1,0 +1,36 @@
+-- RideShare forward fix: rebuild INVALID / missing concurrently-built indexes without blocking writes.
+-- psql ONLY (uses \gexec; CREATE/DROP INDEX CONCURRENTLY cannot run inside a transaction block, so this
+-- file must NOT be wrapped in BEGIN and cannot run in the Neon SQL Editor as one batch — there, run the
+-- statements it prints one at a time). Approval-gated on production (it is DDL). Idempotent: safe to rerun.
+--   psql "$MIGRATOR_DIRECT_URL" -X -v ON_ERROR_STOP=1 -f docs/release/sql/forward_fix_indexes.psql
+-- Only touches the four indexes RideShare builds concurrently; anything else INVALID is reported, not fixed.
+\set ON_ERROR_STOP 1
+SET lock_timeout = '5s';         -- the short SHARE UPDATE EXCLUSIVE steps must not queue behind DDL
+SET statement_timeout = 0;       -- the build itself may take as long as it needs
+-- 1. Report every invalid index first.
+SELECT c.relname AS invalid_index, t.relname AS on_table FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_class t ON t.oid = i.indrelid
+ WHERE c.relnamespace = to_regnamespace(current_schema()) AND (NOT i.indisvalid OR NOT i.indisready);
+-- 2. Drop ours if INVALID (one statement each, outside any transaction).
+SELECT format('DROP INDEX CONCURRENTLY IF EXISTS %I', c.relname)
+  FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+ WHERE c.relnamespace = to_regnamespace(current_schema()) AND (NOT i.indisvalid OR NOT i.indisready)
+   AND c.relname IN ('ix_rides_driver_id_departure_time_id', 'ix_bookings_passenger_id_id',
+                     'ix_bookings_ride_id_id', 'ix_bookings_pending_expires_at') \gexec
+-- 3. (Re)create whatever is missing. Definitions are identical to e3a7c41b9f52 / c1a7e0b00002.
+SELECT stmt FROM (VALUES
+  ('ix_rides_driver_id_departure_time_id', 'rides', NULL::text,
+   'CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_rides_driver_id_departure_time_id ON rides (driver_id, departure_time, id)'),
+  ('ix_bookings_passenger_id_id', 'bookings', NULL,
+   'CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_bookings_passenger_id_id ON bookings (passenger_id, id)'),
+  ('ix_bookings_ride_id_id', 'bookings', NULL,
+   'CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_bookings_ride_id_id ON bookings (ride_id, id)'),
+  ('ix_bookings_pending_expires_at', 'bookings', 'expires_at',
+   'CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_bookings_pending_expires_at ON bookings (expires_at) WHERE status = ''pending''')
+) v(name, tbl, needs_col, stmt)
+WHERE to_regclass(name) IS NULL
+  AND (needs_col IS NULL OR EXISTS (SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = tbl AND column_name = needs_col)) \gexec
+-- 4. Verify: must return zero rows.
+SELECT c.relname AS still_invalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+ WHERE c.relnamespace = to_regnamespace(current_schema()) AND (NOT i.indisvalid OR NOT i.indisready);

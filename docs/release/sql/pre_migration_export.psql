@@ -1,0 +1,38 @@
+-- RideShare pre-migration safety export (FORWARD_RECOVERY_PLAN.md §4). psql ONLY (\copy writes files on
+-- the operator's machine, in the current directory). READ-ONLY on the server. Approval-gated on production.
+--   mkdir -p ~/rideshare-export-$(date -u +%Y%m%dT%H%MZ) && cd "$_" && umask 077
+--   psql "$READONLY_DIRECT_URL" -X -v ON_ERROR_STOP=1 -f /path/to/docs/release/sql/pre_migration_export.psql
+-- Files hold ids and admin audit rows (actor/target ids + reasons) but no email/name/phone/CNIC. Keep them
+-- encrypted at rest; delete 30 days after the release is accepted.
+\set ON_ERROR_STOP 1
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY;
+SET LOCAL statement_timeout = '120s';
+SET LOCAL lock_timeout = '2s';
+SELECT now() AT TIME ZONE 'UTC' AS export_snapshot_utc, (SELECT string_agg(version_num, ',') FROM alembic_version) AS revision
+\gset
+\echo export snapshot :export_snapshot_utc UTC at revision :revision
+-- Exists only from c1a7e0b00002: booking ids whose status is 'expired' (downgrade rewrites them to cancelled).
+SELECT to_regclass('bookings') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+       WHERE t.typname = 'bookingstatus' AND e.enumlabel = 'expired') AS has_expired,
+       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+               AND table_name = 'users' AND column_name = 'account_status') AS has_status,
+       to_regclass('admin_audit_log') IS NOT NULL AS has_audit,
+       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+               AND table_name = 'bookings' AND column_name = 'seats_requested') AS has_seats
+\gset
+\if :has_expired
+\copy (SELECT id FROM bookings WHERE status::text = 'expired' ORDER BY id) TO 'expired_booking_ids.csv' WITH (FORMAT csv, HEADER)
+\endif
+\if :has_status
+\copy (SELECT id, account_status, token_version FROM users WHERE account_status <> 'active' OR token_version > 0 ORDER BY id) TO 'user_status.csv' WITH (FORMAT csv, HEADER)
+\endif
+\if :has_audit
+\copy (SELECT id, actor_id, action, target_type, target_id, reason, metadata, created_at FROM admin_audit_log ORDER BY id) TO 'admin_audit_log.csv' WITH (FORMAT csv, HEADER)
+\endif
+\if :has_seats
+\copy (SELECT id, ride_id, seats_requested FROM bookings WHERE seats_requested <> 1 ORDER BY id) TO 'multi_seat_bookings.csv' WITH (FORMAT csv, HEADER)
+\endif
+-- Counts to compare against the files (wc -l minus header) and against detection after recovery.
+\copy (SELECT 'bookings' AS t, count(*) FROM bookings UNION ALL SELECT 'rides', count(*) FROM rides UNION ALL SELECT 'users', count(*) FROM users) TO 'row_counts.csv' WITH (FORMAT csv, HEADER)
+ROLLBACK;
+\echo done: files written to the current directory
