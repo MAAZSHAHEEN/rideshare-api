@@ -34,7 +34,7 @@ Restores production **as of a timestamp** into a new branch; production is never
    `constraints.not_validated = 0`; `indexes.invalid = 0`; `indexes.expected_present = 5`;
    `triggers.audit_append_only = 2`; every `inv.*` = 0; every `seq.*_ok` = t.
 7. Optional (recommended once): point a FastAPI Cloud preview at the drill branch (after the
-   staging sanitization of NEON_STAGING_PLAN §3, since the branch contains real PII) and run
+   staging sanitization of NEON_STAGING_PLAN §5.1, since the branch contains real PII) and run
    STAGING_SMOKE_CHECKLIST §4 — proves the app starts on a restored database.
 8. Stop the stopwatch; record elapsed time vs RTO. Delete the branch.
 

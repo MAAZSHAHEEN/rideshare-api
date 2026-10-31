@@ -1,0 +1,32 @@
+-- RideShare forward re-apply after an emergency downgrade + re-upgrade (FORWARD_RECOVERY_PLAN.md §5, path F3).
+-- psql ONLY. WRITES (approval-gated). Run in the export directory, AFTER `alembic upgrade head` succeeded
+-- again. One transaction: all or nothing. Re-running after success fails safely on the audit-log primary key.
+--   psql "$MIGRATOR_DIRECT_URL" -X -v ON_ERROR_STOP=1 -f /path/to/docs/release/sql/reapply_after_downgrade.psql
+\set ON_ERROR_STOP 1
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
+CREATE TEMP TABLE r_expired (id int PRIMARY KEY) ON COMMIT DROP;
+CREATE TEMP TABLE r_status (id int PRIMARY KEY, account_status text, token_version int) ON COMMIT DROP;
+CREATE TEMP TABLE r_audit (LIKE admin_audit_log INCLUDING DEFAULTS) ON COMMIT DROP;
+\copy r_expired FROM 'expired_booking_ids.csv' WITH (FORMAT csv, HEADER)
+\copy r_status FROM 'user_status.csv' WITH (FORMAT csv, HEADER)
+\copy r_audit (id, actor_id, action, target_type, target_id, reason, metadata, created_at) FROM 'admin_audit_log.csv' WITH (FORMAT csv, HEADER)
+-- 1. 'expired' bookings that the downgrade turned into 'cancelled' get their status back (only those).
+UPDATE bookings b SET status = 'expired' FROM r_expired r WHERE b.id = r.id AND b.status = 'cancelled';
+-- 2. Suspensions come back, and every exported token_version is bumped by 1 past what it was, so any token
+--    issued while the columns were missing (old code) is rejected.
+UPDATE users u SET account_status = r.account_status, token_version = greatest(u.token_version, r.token_version) + 1
+  FROM r_status r WHERE u.id = r.id;
+-- 3. Audit history is re-inserted with its original ids (INSERT is allowed; UPDATE/DELETE stay blocked),
+--    (No synthetic "recovery" audit row: the app only accepts its own action/target codes; record the
+--    recovery in the ops log instead.)
+INSERT INTO admin_audit_log (id, actor_id, action, target_type, target_id, reason, metadata, created_at)
+  SELECT id, actor_id, action, target_type, target_id, reason, metadata, created_at FROM r_audit ORDER BY id;
+SELECT setval(pg_get_serial_sequence('admin_audit_log', 'id'), greatest((SELECT max(id) FROM admin_audit_log), 1));
+SELECT (SELECT count(*) FROM r_expired) AS expired_in_file,
+       (SELECT count(*) FROM bookings b JOIN r_expired r USING (id) WHERE b.status = 'expired') AS expired_restored,
+       (SELECT count(*) FROM r_status) AS status_in_file,
+       (SELECT count(*) FROM users u JOIN r_status r USING (id) WHERE u.account_status = r.account_status) AS status_restored,
+       (SELECT count(*) FROM r_audit) AS audit_in_file;
+COMMIT;

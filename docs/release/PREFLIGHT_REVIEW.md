@@ -68,3 +68,5 @@ EM SPACE, tab and ideographic-space padding, `İsa`/`isa`, `ẞtrasse`/`ßtrasse
    The id lists stay with Maaz unless a twin decision needs them.
 4. `case_duplicate_groups` must be **0** before `f6b2d8e0c413`. Otherwise decide per group (merge,
    rename the stale account) — a data change needing its own approval.
+
+**31 Oct 2026 (a1-docs):** for production, the rev 2 logic runs **inside A1** as aggregates only (blocking groups and rows, trim+lower and near-duplicate groups, padded/NBSP/invisible counts; ids only through an optional commented block): [A1_EXECUTION_INSTRUCTIONS.md](A1_EXECUTION_INSTRUCTIONS.md). `sql/prod_email_preflight.sql` stays as the id-returning operator tool.

@@ -41,6 +41,11 @@ on PR #27.
    (`b83d12f7a906`, `7c2e9a4b6d10`), or was created by `Base.metadata.create_all` and never stamped
    (the pre-Alembic-authoritative era). The API surface is identical in all three cases.
 
+**Superseded for execution by A1** ([A1_EXECUTION_INSTRUCTIONS.md](A1_EXECUTION_INSTRUCTIONS.md),
+[`sql/A1_readonly_baseline_and_preflight.sql`](sql/A1_readonly_baseline_and_preflight.sql)): one paste returns the
+revision, a per-migration schema fingerprint, counts and the email preflight. The minimal query below is kept
+for reference.
+
 **Verification (approval-gated, read-only, Maaz runs it in the Neon SQL Editor on the production
 branch or with a read-only role):**
 
@@ -99,6 +104,8 @@ mixed-case twins and an admin, 5 rides (two with 0 seats, one departed-but-activ
 | Multi-seat counts | `c1a7e0b00003` | Downgrade **refuses** (`MultiSeatDowngradeRefused`, nothing changed) while any booking has `seats_requested <> 1`; forcing it would erase how many seats each passenger holds and break seat conservation. | Do not downgrade. Use the kill-switch (§5). | m3 `downgrade` "refused while a 2-seat booking exists" |
 | Email lowercasing / `uq_users_email_lower` | `f6b2d8e0c413` | The migration never rewrites emails (identity is `lower(email)` at query time), so nothing is lost. The boundary is the **preflight**: it aborts on case twins, and resolving twins is a manual, per-account data decision that cannot be undone automatically. | Run the read-only preflight (PREFLIGHT_REVIEW.md, `sql/prod_email_preflight.sql` rev 2) first; written decision per twin group. | m3 `legacy`; PREFLIGHT_REVIEW §4 |
 | Concurrently built indexes | `e3a7c41b9f52`, `c1a7e0b00002` | Not lossy. `CREATE INDEX CONCURRENTLY` cannot run in a transaction; if interrupted it leaves an INVALID index, which the next `upgrade` drops and rebuilds. It waits for every older transaction, so a long-running transaction stalls it. | Check `pg_stat_activity` for transactions older than 1 min; pause the job schedule during the upgrade. | m3 `interrupt` (both variants) |
+
+Detection queries, forward fixes and the pre-migration backup gate for each boundary: [FORWARD_RECOVERY_PLAN.md](FORWARD_RECOVERY_PLAN.md).
 
 ## 5. Rollback strategy per revision
 

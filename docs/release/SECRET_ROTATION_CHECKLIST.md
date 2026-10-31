@@ -61,15 +61,18 @@ change invalidates all tokens including those with a current `tv`; `token_versio
 they are and need no change. Admin tokens are invalidated too.
 
 - [ ] Coordinate with the RC deploy (one sign-out instead of two) or do it off-peak.
-- [ ] Generate locally: `python -c "import secrets; print(secrets.token_urlsafe(48))"` → paste only
-      into FastAPI Cloud env (production). Keep the old value in the password manager for 24 h
-      (rollback only).
+- [ ] Generate locally **two** fresh keys: `python -c "import secrets; print(secrets.token_urlsafe(48))"`
+      twice → **K-new** (goes into FastAPI Cloud env now) and **K-standby** (stored only in the password
+      manager, labelled "standby, never deployed"). Paste only into FastAPI Cloud env. The old value is
+      **not** kept as a rollback option (§3.5): if it is F3 or might be, it is burned; if it is a never-
+      leaked key, it still is not used again (rolling back to it would re-validate every token it signed).
 - [ ] Redeploy / restart so the new value is loaded (config is read at import).
 - [ ] Verify: an old token → `GET /me` 401; fresh login → 200 and `GET /me` 200; decoded header
       `alg=HS256`; `/readyz` ready.
-- [ ] Staging/preview keys are **different** from production (NEON_STAGING_PLAN §7).
-- [ ] Rollback: set the old value back and redeploy (only if the new value breaks startup, e.g. too
-      short; tokens issued in between are invalidated again).
+- [ ] Staging/preview keys are **different** from production (NEON_STAGING_PLAN §9).
+- [ ] Rollback (only if K-new breaks startup or verification): deploy **K-standby**, never the old
+      value. Effect is the same as the rotation itself (everyone signs in again). Then generate a new
+      standby. See §3.5 for why and for the dual-key window proposal.
 - [ ] Record date/time (not the value) in the ops log.
 
 ### 3.2 Database password (only if §3.0 found reuse or any doubt)
@@ -82,8 +85,12 @@ Zero-gap role swap (preferred over resetting the password in place):
 - [ ] Update `JOBS_DATABASE_URL` (direct host) if the jobs role is affected.
 - [ ] Verify: `/readyz` ready; login + one booking flow on a staff account; Neon
       `SELECT usename, count(*) FROM pg_stat_activity GROUP BY 1` shows the new role only.
-- [ ] After 24 h with no errors: drop or `NOLOGIN` the old role.
-- [ ] Rollback: point `DATABASE_URL` back to the old role (still valid until dropped).
+- [ ] Immediately (not after 24 h) when the old password is or might be F1: `ALTER ROLE <old> NOLOGIN`
+      and terminate its sessions once `/readyz` is green on the new role; drop it after 24 h.
+      If the old password is not suspected: `NOLOGIN` after 24 h with no errors, then drop.
+- [ ] Rollback: **never** back to the old role/password. Before the swap also create
+      `rideshare_app_v2b` (same grants, its own freshly generated password, stored in the password
+      manager as "standby, never deployed"). If v2 misbehaves, point `DATABASE_URL` at v2b. See §3.5.
 - [ ] Local: change the F1 password on every machine/Docker volume that still uses it.
 
 ### 3.3 Other secrets
@@ -100,3 +107,72 @@ Zero-gap role swap (preferred over resetting the password in place):
 - [ ] Default branch / fast-forward `main` (AST-002 §5) so the public tree no longer shows F2/F3.
 - [ ] Enable secret scanning + push protection; add the gitleaks PR job.
 - [ ] History rewrite: **not recommended** (AST-002 §7) — rotation is what neutralises a value.
+
+### 3.5 Compromised values are never rollback credentials (added 31 Oct 2026, a1-docs)
+
+**Rule.** A secret that is, or may be, exposed — **F1** (local DB password in git history; reuse
+unknown), **F3** (26-char JWT key hard-coded on `main`; possibly valid historically), anything a future
+scan finds, and any value that was ever pasted into chat, a screenshot, a ticket or a log — is
+**burned**: it is never redeployed, never used as a "known good" fallback, never reused for staging,
+tests or another service. "Rollback" of a rotation always means moving **forward to another freshly
+generated value**, never back.
+
+| Secret | Rotation | Rollback means | Never |
+|---|---|---|---|
+| `SECRET_KEY` (JWT) | K-new deployed | deploy K-standby (fresh, never deployed before) | the previous key, F3, any staging key |
+| App DB role/password | role swap to `rideshare_app_v2` | switch to `rideshare_app_v2b` (pre-created, own fresh password) | the old role's password, F1, a reset back to a remembered value |
+| Jobs DB URL / heartbeat / rate-limit HMAC | fresh per environment | another fresh value | copying prod ↔ staging values |
+
+**Dual-key JWT window (proposal for the auth owner, #10/#13 — not implemented on #25).** Today the app
+has one `SECRET_KEY` (`config.py`; `jwt.encode`/`jwt.decode` in `routers/auth.py` / `routers/dependencies.py`),
+so any key change signs everyone out at once and a "rollback" can only be a full second sign-out. A
+small key ring would allow zero-sign-out rotation **without** ever trusting an old compromised key:
+
+- env `JWT_SIGNING_KEYS` = JSON `{"<kid>": "<key>", …}`, `JWT_ACTIVE_KID` = the kid used to sign;
+  tokens carry `kid` in the JWS header; verify looks up the key by `kid` from the ring only (unknown
+  `kid` → 401; `alg` still pinned).
+- Planned rotation: ring = {new primary (active), new standby}; the *previous* key may stay in the ring
+  for at most `ACCESS_TOKEN_EXPIRE_MINUTES` (60 min) **only if it is not suspected**; a suspected key
+  (F3, or any doubt) is removed immediately — users signed with it re-login, which is the point.
+- Rollback = flip `JWT_ACTIVE_KID` to the standby kid; the old key never returns.
+- `token_version` (`tv`) is unaffected (per-user), as today.
+
+**Denylist of known-compromised values at startup (proposal, follow-up for the #10/#13 owner).**
+`config.py` already rejects F3 indirectly (HS256 keys < 32 bytes and placeholder prefixes fail at
+import), but a future leaked value of valid length would pass. Proposed addition, ~10 lines, no
+plaintext stored:
+
+```python
+# config.py (proposal) — SHA-256 hex digests of burned SECRET_KEY / DB password values.
+# Add a digest when a value is burned; never add the value itself.
+_COMPROMISED_SHA256 = frozenset(filter(None, os.getenv("COMPROMISED_SECRET_SHA256", "").split(","))) | {
+    # "<sha256 of F3>",  # filled by Maaz locally: python -c "import hashlib,getpass;print(hashlib.sha256(getpass.getpass().encode()).hexdigest())"
+}
+def _burned(value: str) -> bool:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() in _COMPROMISED_SHA256
+if _burned(SECRET_KEY):
+    raise RuntimeError("SECRET_KEY is on the compromised-secret denylist; generate a new key")
+_db_pw = urllib.parse.urlsplit(DATABASE_URL).password  # where DATABASE_URL is parsed
+if _db_pw and _burned(_db_pw):
+    raise RuntimeError("DATABASE_URL uses a compromised password; rotate the role")
+```
+
+Notes: an unsalted SHA-256 of a 26-char random key is not brute-forceable, but the digest of a short
+password (F1 is 9 chars) **is** guessable offline — so the F1 digest goes only into the deploy env
+(`COMPROMISED_SECRET_SHA256`), never into the repository; the F3 digest may be committed. Tests: a unit
+test with a test-only burned value (never a real one) asserting the import fails. Owner: auth/config PR
+owner (#10 PyJWT / #13 config); **not** edited on #25.
+
+**Revocation verification (after every rotation or rollback):**
+
+- [ ] JWT: a token minted before the change → `GET /me` **401**; a token signed locally with the old
+      key (Maaz, locally, never in chat) → 401; a token with `alg=none` → 401; fresh login → 200.
+- [ ] JWT (once the key ring exists): token with the removed `kid` → 401; unknown `kid` → 401.
+- [ ] DB: `psql` with the old role/password → `FATAL: password authentication failed` or
+      `role … is not permitted to log in`; Neon `SELECT usename, count(*) FROM pg_stat_activity GROUP BY 1`
+      shows no session of the old role; `SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname = '<old>'`
+      → `false` (or no row after the drop).
+- [ ] Startup denylist (once implemented): deploying with a burned value fails fast at import (check on a
+      preview, never on production).
+- [ ] Ops log: date/time, which secret, which standby was consumed (labels only, never values); create
+      the next standby the same day.
