@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
+from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -520,8 +521,39 @@ class SuspensionRaceTests(SuspensionTestBase):
                     "AND wait_event_type = 'Lock'"))
                 if waiting or task.done():
                     return bool(waiting)
+                # pg_stat_activity's list of backends is snapshotted once per transaction:
+                # end it, or a backend that connected after the first poll is never seen.
+                await conn.rollback()
                 await asyncio.sleep(0.02)
         return False
+
+    async def test_wait_until_blocked_sees_a_waiter_that_connects_after_the_first_poll(self):
+        # R-2: the helper itself. pg_stat_activity's backend list is snapshotted
+        # once per transaction (wait_event is read live, the list is not), so a
+        # backend that connects only after the helper's first poll was never seen
+        # while the helper polled inside one transaction (same bug as #29 9415824).
+        ride = await self.add_ride(driver="other_driver", seats=2)
+        late_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool, connect_args={
+            "server_settings": {"search_path": self.schema, "lock_timeout": "10000"}})
+        self.addAsyncCleanup(late_engine.dispose)
+        async with self.engine.connect() as holder:
+            await holder.begin()
+            await holder.execute(text("SELECT id FROM rides WHERE id = :id FOR UPDATE"), {"id": ride})
+
+            async def connect_and_block_later():
+                await asyncio.sleep(0.3)  # well after the helper's first poll
+                async with late_engine.connect() as waiter:  # a brand-new backend
+                    await waiter.execute(text("SELECT id FROM rides WHERE id = :id FOR UPDATE"),
+                                         {"id": ride})
+                    await waiter.rollback()
+
+            blocked = asyncio.create_task(connect_and_block_later())
+            try:
+                self.assertTrue(await self.wait_until_blocked(blocked, timeout=3.0),
+                                "a waiter that connected after the first poll was not seen")
+            finally:
+                await holder.rollback()
+                await asyncio.wait_for(blocked, timeout=10)
 
     async def test_suspension_first_rejects_concurrent_booking(self):
         ride = await self.add_ride(driver="other_driver", seats=2)
