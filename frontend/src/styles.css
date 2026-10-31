@@ -20,3 +20,4 @@
 .mode-switcher a{display:flex;align-items:center;justify-content:center;gap:8px;padding:11px 17px;border-radius:8px;font-size:.79rem;font-weight:650;color:#536b87;min-height:44px}
 .mode-switcher a:hover{background:#edf4ff}.mode-switcher a.selected{background:var(--blue);color:#fff;box-shadow:0 3px 8px #1457df20}
 @media(max-width:640px){.mode-bar-inner{align-items:stretch;flex-direction:column;gap:10px;padding-top:14px;padding-bottom:14px}.mode-bar-inner>div{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}.mode-switcher a{flex:1;padding:10px 8px;font-size:.75rem}}
+.state-title{font-size:1.4rem}.state-actions{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}

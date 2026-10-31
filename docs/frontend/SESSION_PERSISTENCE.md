@@ -46,28 +46,47 @@ contract changes through the lead, so D/E are documented below as the follow-up.
 ### What is stored
 
 - Key `rideshare.session.v1` in `window.sessionStorage` only. Value:
-  `{ token, expiresAt, mode }`. `mode` is the presentation-only travel mode.
+  `{ token, receivedAt, mode }`. `receivedAt` is the device wall-clock time the
+  token arrived (D-RC-1); `mode` is the presentation-only travel mode. (Older
+  values with `expiresAt` are still read; `expiresAt` is ignored.)
 - Never stored: the profile (name, email, role), CNIC, phone, passwords, any
   API response. `localStorage` is never written (asserted in Vitest and
   Playwright).
 
-### Rules (frontend/src/auth/sessionStore.ts, AuthProvider.tsx)
+### Rules (frontend/src/auth/sessionStore.ts, AuthProvider.tsx, clock.ts)
 
 1. Written only after a successful login **and** a valid `GET /me`.
 2. On load, the stored value is parsed defensively. Malformed JSON, a non-string
-   or oversized token, or a token whose own `exp` has passed is deleted without
-   any network call. The stored `expiresAt` is ignored; expiry is re-derived from
-   the token so editing storage cannot extend it.
-3. A stored token is never trusted on its own: the app shows "Restoring your
-   session…" and calls `GET /me` with it. Only a valid identity restores the
-   session; 401 → cleared with "Your session has ended"; network/5xx → cleared
-   with "We couldn't restore your session" (fail closed).
-4. Any protected 401 (existing generation check), the JWT expiry timer, focus or
+   or oversized token, or a token without a valid `exp` (or with `iat >= exp`) is
+   deleted without any network call.
+3. **Expiry is a hint; the server's 401 is the authority (D-RC-1).** The client
+   never compares the token's absolute `exp` with the device clock (that broke
+   sign-in for a device clock ~60 min fast and stretched sessions on a slow one).
+   It uses the server-issued lifetime `exp − iat`, counted from receipt:
+   - at sign-in, `remaining = (exp − iat) − time since the login response`;
+   - within the page the timer runs on `performance.now()` (monotonic), so setting
+     the device clock forward or back does not end or extend the session;
+   - across a reload, elapsed time is `Date.now() − receivedAt` (a clock set back
+     counts as 0); a consistently fast or slow clock cancels out.
+   - Tokens without `iat` fall back to `exp − now` when positive, else no hint.
+   - A hint that says "expired" never signs out on its own during restore: `GET /me`
+     decides. A 401 then reads "Your session has expired"; any other 401 reads
+     "Your session has ended". Editing `receivedAt` can at most stretch the UI hint
+     to one token lifetime; the server still rejects the token at its `exp`.
+4. **Restore signs out only on the server's verdict (D-RC-2).** A stored token is
+   never trusted on its own: the app shows "Restoring your session…" and calls
+   `GET /me`. A valid identity restores the session; 401/403 or an invalid
+   profile clears it. A network error, timeout, 5xx or 429 keeps the stored
+   session and shows "Can’t reach RideShare" with **Retry** and **Sign out**; no
+   redirect happens and nothing from before the reload is rendered. It retries
+   automatically on the browser's `online` event and on a backoff (5 s, 10 s,
+   20 s, then every 30 s). An abort caused by the page unloading is ignored.
+5. Any protected 401 (existing generation check), the expiry timer, focus or
    visibility checks, and logout all clear the key and the TanStack Query cache.
-5. Tab scope: a new tab or window starts signed out (sessionStorage is
+6. Tab scope: a new tab or window starts signed out (sessionStorage is
    per-tab), and the data disappears when the tab closes. Duplicating a tab
    copies it (browser behaviour); that copy expires with the token.
-6. Return path: when a guard sends a visitor to `/login`, it passes the current
+7. Return path: when a guard sends a visitor to `/login`, it passes the current
    in-app path (`/passenger?ride=7`). `safeReturnPath` accepts only same-origin
    `/passenger`, `/driver`, `/account` paths (rejects `//host`, backslashes,
    absolute URLs, `javascript:`). A deliberate logout keeps no return path.
