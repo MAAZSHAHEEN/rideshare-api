@@ -11,6 +11,7 @@ booking changes) before calling these helpers: they judge the state they are
 given and never re-read it. See docs/architecture/BOOKING_LIFECYCLE.md.
 """
 
+import os
 from datetime import datetime
 from typing import Literal
 
@@ -26,6 +27,8 @@ BookingAction = Literal["accept", "reject", "cancel", "expire"]
 RIDE_NOT_ACTIVE = "Ride is not active"
 RIDE_DEPARTED = "Ride has already departed"
 NO_SEATS = "No seats available"
+# c1a7e0b00003: some seats remain, but fewer than the request holds.
+NOT_ENOUGH_SEATS = "Not enough seats available"
 ALREADY_RESPONDED = "Booking already responded to"
 NOT_CANCELLABLE = "Booking cannot be cancelled"
 BOOKING_EXPIRED = "Booking request has expired"  # c1a7e0b00002, see booking_expiry.py
@@ -46,8 +49,10 @@ BOOKING_TRANSITIONS: dict[tuple[BookingStatus, BookingAction], BookingStatus] = 
     (BookingStatus.pending, "expire"): BookingStatus.expired,
 }
 
-# Change to ride.available_seats for each allowed booking transition. A seat is
-# debited only on acceptance and restored only when that known debit is undone.
+# Direction of the change to ride.available_seats for each allowed booking
+# transition, multiplied by the booking's seats_requested (c1a7e0b00003). Seats
+# are debited only on acceptance and restored only when that known debit is
+# undone, so every restoration returns exactly what was taken.
 SEAT_EFFECT: dict[tuple[BookingStatus, BookingAction], int] = {
     (BookingStatus.pending, "accept"): -1,
     (BookingStatus.accepted, "cancel"): +1,
@@ -92,16 +97,59 @@ def require_not_departed(ride: Ride, now: datetime | None = None) -> None:
         raise conflict(RIDE_DEPARTED)
 
 
+# Schema/DB hard bound is 8 (schemas.MAX_SEATS_PER_BOOKING, DB CHECK). The
+# runtime limit can only lower it: BOOKING_MAX_SEATS=1 switches multi-seat
+# requests off without a code revert (rollout/rollback lever, see
+# docs/architecture/BOOKING_SCHEMA_CHANGES.md §3). Validated at import.
+HARD_MAX_SEATS = 8
+
+
+def max_seats_from_environment() -> int:
+    raw = os.getenv("BOOKING_MAX_SEATS", str(HARD_MAX_SEATS))
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError("BOOKING_MAX_SEATS must be an integer") from None
+    if not 1 <= value <= HARD_MAX_SEATS:
+        raise RuntimeError(f"BOOKING_MAX_SEATS must be between 1 and {HARD_MAX_SEATS}")
+    return value
+
+
+MAX_SEATS = max_seats_from_environment()
+
+
+def seat_count(booking) -> int:
+    """Seats a booking holds once accepted. A transient ORM object not yet
+    flushed (column default not applied) counts as 1, like the DB default."""
+    seats = getattr(booking, "seats_requested", None)
+    if seats is None:
+        return 1
+    if type(seats) is not int or not 1 <= seats <= HARD_MAX_SEATS:
+        raise ValueError("booking.seats_requested out of range")
+    return seats
+
+
+def seats_conflict(available: int) -> HTTPException:
+    """409 for a request/acceptance needing more seats than ``available``."""
+    return conflict(NO_SEATS if available < 1 else NOT_ENOUGH_SEATS)
+
+
+def require_seats_available(ride: Ride, seats: int) -> None:
+    if ride.available_seats < seats:
+        raise seats_conflict(ride.available_seats)
+
+
 def apply_booking_transition(ride: Ride, booking, action: BookingAction) -> None:
     """Move ``booking`` and adjust the locked ride's seat counter atomically.
 
-    Raises 409 without mutating anything when the move is illegal or would
-    drive ``available_seats`` below zero.
+    The change is ``SEAT_EFFECT * seats_requested``. Raises 409 without
+    mutating anything when the move is illegal or would drive
+    ``available_seats`` below zero.
     """
     target = booking_target(booking.status, action)
-    delta = SEAT_EFFECT.get((booking.status, action), 0)
+    delta = SEAT_EFFECT.get((booking.status, action), 0) * seat_count(booking)
     if ride.available_seats + delta < 0:
-        raise conflict(NO_SEATS)
+        raise seats_conflict(ride.available_seats)
     ride.available_seats += delta
     booking.status = target
 

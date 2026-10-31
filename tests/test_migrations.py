@@ -32,7 +32,7 @@ with patch.dict(os.environ, {
     from models import Base
 
 
-HEAD = "c1a7e0b00002"
+HEAD = "c1a7e0b00003"
 # Milestone C objects absent before HEAD's chain (stripped for older revisions).
 MILESTONE_C_TABLES = ("idempotency_keys",)
 
@@ -169,10 +169,22 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                      "ix_bookings_ride_id_id": ["ride_id", "id"]},
     }
 
+    def c1a7_0002_metadata(self):
+        """Schema at c1a7e0b00002, before multi-seat bookings (c1a7e0b00003)."""
+        metadata = MetaData()
+        for table in Base.metadata.sorted_tables:
+            historical = table.to_metadata(metadata)
+            if table.name == "bookings":
+                historical._columns.remove(historical.c.seats_requested)
+                historical.constraints = {
+                    constraint for constraint in historical.constraints
+                    if constraint.name != "ck_bookings_seats_requested_range"}
+        return metadata
+
     def c1a7_0001_metadata(self):
         """Schema at c1a7e0b00001, before pending expiry (c1a7e0b00002)."""
         metadata = MetaData()
-        for table in Base.metadata.sorted_tables:
+        for table in self.c1a7_0002_metadata().sorted_tables:
             historical = table.to_metadata(metadata)
             if table.name == "bookings":
                 historical._columns.remove(historical.c.expires_at)
@@ -693,7 +705,7 @@ with patch.object(MetaData, 'create_all', side_effect=AssertionError('startup ca
         before = await self.table_rows()
         for attempt in range(2):
             await self.run_python("-m", "alembic", "upgrade", "c1a7e0b00002")
-            await self.assert_metadata_matches()
+            await self.assert_metadata_matches(self.c1a7_0002_metadata(), "c1a7e0b00002")
             self.assertEqual(await self.table_rows(), before)
             async with self.engine.connect() as connection:
                 self.assertEqual(await connection.scalar(text(
@@ -780,6 +792,135 @@ with patch.object(MetaData, 'create_all', side_effect=AssertionError('startup ca
                 "SELECT status::text FROM bookings ORDER BY id"))).scalars().all()
             self.assertEqual(statuses, ["expired", "accepted", "rejected", "cancelled",
                                         "accepted", "expired", "expired"])
+
+    # --- Milestone C: c1a7e0b00003 multi-seat bookings -------------------------
+
+    async def seats_state(self):
+        async with self.engine.connect() as connection:
+            column = (await connection.execute(text(
+                "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_name = 'bookings' AND column_name = 'seats_requested'"))).all()
+            constraint = (await connection.execute(text(
+                "SELECT convalidated FROM pg_constraint "
+                "WHERE conname = 'ck_bookings_seats_requested_range'"))).scalars().all()
+            seats = (await connection.execute(text(
+                "SELECT seats_requested FROM bookings ORDER BY id"))).scalars().all() if column else None
+            return column, constraint, seats
+
+    async def version(self):
+        async with self.engine.connect() as connection:
+            return await connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    async def test_multi_seat_upgrade_downgrade_reupgrade_keeps_legacy_rows(self):
+        await self.prepare_integrity_data("c1a7e0b00002")
+        await self.seed_legacy_bookings()
+        before = await self.table_rows()
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "c1a7e0b00003")
+            await self.assert_metadata_matches()
+            self.assertEqual(await self.table_rows(), before)
+            # Legacy rows read 1 through the fast default; constraint validated.
+            self.assertEqual(await self.seats_state(),
+                             ([("integer", "NO", "1")], [True], [1, 1, 1, 1]))
+            for bad in (0, 9, -1):
+                await self.assert_sql_rejected(
+                    "UPDATE bookings SET seats_requested = :n WHERE id = 1", "23514",
+                    "ck_bookings_seats_requested_range", {"n": bad})
+            await self.assert_sql_rejected(
+                "UPDATE bookings SET seats_requested = NULL WHERE id = 1", "23502")
+            await self.execute_sql("UPDATE bookings SET seats_requested = 8 WHERE id = 1")
+            await self.execute_sql("UPDATE bookings SET seats_requested = 1 WHERE id = 1")
+            await self.run_python("-m", "alembic", "downgrade", "c1a7e0b00002")
+            await self.assert_metadata_matches(self.c1a7_0002_metadata(), "c1a7e0b00002")
+            self.assertEqual(await self.table_rows(), before)
+            self.assertEqual((await self.seats_state())[:2], ([], []))
+
+    async def test_multi_seat_downgrade_refuses_while_multi_seat_bookings_exist(self):
+        await self.prepare_integrity_data("head")
+        await self.seed_legacy_bookings()
+        await self.execute_sql("UPDATE bookings SET seats_requested = 3 WHERE status = 'accepted'")
+        await self.execute_sql("UPDATE bookings SET seats_requested = 2 WHERE status = 'rejected'")
+        before = await self.table_rows()
+        for target in ("c1a7e0b00002", "f6b2d8e0c413"):
+            with self.subTest(target=target):
+                output = await self.run_python("-m", "alembic", "downgrade", target,
+                                               expect_failure=True)
+                self.assertIn("MultiSeatDowngradeRefused", output)
+                self.assertIn("accepted=1 (3 seats), rejected=1 (2 seats)", output)
+                self.assertEqual(await self.version(), HEAD)
+                self.assertEqual(await self.seats_state(),
+                                 ([("integer", "NO", "1")], [True], [1, 3, 2, 1]))
+                self.assertEqual(await self.table_rows(), before)
+        # Documented remediation: resolve the rows deliberately, then re-run.
+        await self.execute_sql("UPDATE bookings SET seats_requested = 1")
+        await self.run_python("-m", "alembic", "downgrade", "c1a7e0b00002")
+        await self.assert_metadata_matches(self.c1a7_0002_metadata(), "c1a7e0b00002")
+        self.assertEqual(await self.table_rows(), before)
+
+    async def test_multi_revision_upgrade_failing_in_multi_seat_revision_keeps_earlier_stamps(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        await self.seed_legacy_bookings()
+        before = await self.table_rows()
+        # A stray column of another shape: c1a7e0b00003 must refuse, not adopt it.
+        await self.execute_sql("ALTER TABLE bookings ADD COLUMN seats_requested smallint")
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("UnexpectedSeatsColumn", output)
+        self.assertEqual(await self.version(), "c1a7e0b00002")
+        async with self.engine.connect() as connection:
+            self.assertEqual(await connection.scalar(text(
+                "SELECT count(*) FROM information_schema.columns WHERE table_name = 'bookings' "
+                "AND column_name = 'expires_at'")), 1)
+        await self.execute_sql("ALTER TABLE bookings DROP COLUMN seats_requested")
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        await self.assert_metadata_matches()
+        self.assertEqual(await self.table_rows(), before)
+
+    async def test_multi_seat_upgrade_resumes_after_interruption_and_refuses_bad_rows(self):
+        await self.prepare_integrity_data("c1a7e0b00002")
+        await self.seed_legacy_bookings()
+        # Interrupted after ADD COLUMN, with a bad row written before the
+        # NOT VALID constraint existed (simulated): VALIDATE must fail.
+        await self.execute_sql(
+            "ALTER TABLE bookings ADD COLUMN seats_requested integer NOT NULL DEFAULT 1")
+        await self.execute_sql("UPDATE bookings SET seats_requested = 0 WHERE id = 2")
+        await self.execute_sql(
+            "ALTER TABLE bookings ADD CONSTRAINT ck_bookings_seats_requested_range "
+            "CHECK (seats_requested >= 1 AND seats_requested <= 8) NOT VALID")
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("ck_bookings_seats_requested_range", output)
+        self.assertEqual(await self.version(), "c1a7e0b00002")
+        self.assertEqual((await self.seats_state())[1], [False])
+        await self.execute_sql("UPDATE bookings SET seats_requested = 1 WHERE id = 2")
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        await self.assert_metadata_matches()
+        self.assertEqual(await self.seats_state(),
+                         ([("integer", "NO", "1")], [True], [1, 1, 1, 1]))
+
+    async def test_multi_seat_upgrade_refuses_foreign_constraint_definition(self):
+        await self.prepare_integrity_data("c1a7e0b00002")
+        await self.execute_sql(
+            "ALTER TABLE bookings ADD COLUMN seats_requested integer NOT NULL DEFAULT 1")
+        await self.execute_sql(
+            "ALTER TABLE bookings ADD CONSTRAINT ck_bookings_seats_requested_range "
+            "CHECK (seats_requested >= 1)")
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("UnexpectedSeatsColumn", output)
+        self.assertEqual(await self.version(), "c1a7e0b00002")
+
+    async def test_multi_seat_upgrade_times_out_behind_a_long_transaction(self):
+        await self.prepare_integrity_data("c1a7e0b00002")
+        await self.seed_legacy_bookings()
+        async with self.engine.connect() as blocker:
+            # An open reader holds ACCESS SHARE; ADD COLUMN needs ACCESS EXCLUSIVE.
+            await blocker.execute(text("SELECT count(*) FROM bookings"))
+            output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+            self.assertIn("lock timeout", output.lower())
+            await blocker.rollback()
+        self.assertEqual(await self.version(), "c1a7e0b00002")
+        self.assertEqual((await self.seats_state())[0], [])
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        await self.assert_metadata_matches()
+
 
 if __name__ == "__main__":
     unittest.main()

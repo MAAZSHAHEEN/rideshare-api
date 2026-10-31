@@ -79,6 +79,9 @@ class Booking(Base):
         # Expiry sweep; created CONCURRENTLY by c1a7e0b00002.
         Index('ix_bookings_pending_expires_at', 'expires_at',
               postgresql_where=text("status = 'pending'")),
+        # Multi-seat bookings; created by c1a7e0b00003 (NOT VALID, then VALIDATE).
+        CheckConstraint('seats_requested >= 1 AND seats_requested <= 8',
+                        name='ck_bookings_seats_requested_range'),
     )
 
     id         = Column(Integer, primary_key=True)
@@ -88,6 +91,9 @@ class Booking(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # c1a7e0b00002. NULL = legacy request: expires at the ride's departure.
     expires_at = Column(DateTime(timezone=True), nullable=True)
+    # c1a7e0b00003. Seats this request asks for and, once accepted, holds.
+    # Legacy rows read 1 through the constant (fast) server default.
+    seats_requested = Column(Integer, nullable=False, default=1, server_default=text("1"))
 
 
 class IdempotencyKey(Base):

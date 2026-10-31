@@ -178,7 +178,8 @@ class ExpiryApiTests(unittest.IsolatedAsyncioTestCase):
         for ride_id, expected in ((far, T0 + timedelta(hours=6)), (near, T0 + timedelta(hours=1))):
             response = await self.book(ride_id)
             self.assertEqual(response.status_code, 201, response.text)
-            self.assertEqual(set(response.json()), {"id", "ride_id", "passenger_id", "status"})
+            # seats_requested: additive field from c1a7e0b00003 (deliberate contract update).
+            self.assertEqual(set(response.json()), {"id", "ride_id", "passenger_id", "status", "seats_requested"})
             self.assertEqual((await self.rows(ride_id))[2], [(B.pending, expected)])
 
     async def test_accept_refuses_expired_request_at_and_after_expiry(self):

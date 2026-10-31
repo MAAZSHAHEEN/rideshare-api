@@ -164,7 +164,9 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
             for item in result:
                 self.assertEqual(item["ride_id"], item["ride"]["id"])
                 self.assertEqual(item["passenger_id"], self.users["passenger"].id)
-                self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "ride"})
+                # seats_requested: additive field from c1a7e0b00003 (deliberate contract update).
+                self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "seats_requested", "ride"})
+                self.assertEqual(item["seats_requested"], 1)
         for status in BookingStatus:
             expected = [b.id for b in reversed(bookings) if shown_status(b) == status]
             result = await self.get("/bookings/me", status=status.value, limit=100)
@@ -191,7 +193,9 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
             result = await self.get(path, "driver", **params)
             self.assertEqual([item["id"] for item in result], expected)
             for item in result:
-                self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "passenger"})
+                # seats_requested: additive field from c1a7e0b00003 (deliberate contract update).
+                self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "seats_requested", "passenger"})
+                self.assertEqual(item["seats_requested"], 1)
                 self.assertEqual(set(item["passenger"]), {"id", "name"})
                 self.assertEqual(item["passenger"]["id"], item["passenger_id"])
         for status in BookingStatus:

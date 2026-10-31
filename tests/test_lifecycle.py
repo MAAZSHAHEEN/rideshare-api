@@ -225,7 +225,9 @@ class LifecycleApiTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     target, delta = legal
                     self.assertEqual(response.json()["status"], target.value)
-                    self.assertEqual(set(response.json()), {"id", "ride_id", "passenger_id", "status"})
+                    # c1a7e0b00003 added seats_requested (additive, deliberate contract update).
+                    self.assertEqual(set(response.json()), {"id", "ride_id", "passenger_id", "status", "seats_requested"})
+                    self.assertEqual(response.json()["seats_requested"], 1)
                     self.assertEqual(await self.state(ride_id), (ride_status, 2 + delta, [target]))
 
     async def test_ride_matrix_every_ride_state_and_action(self):

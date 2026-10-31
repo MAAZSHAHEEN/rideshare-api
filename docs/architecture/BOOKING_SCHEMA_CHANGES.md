@@ -13,7 +13,7 @@ d924a6e38f10 (production, assumed)
   → f6b2d8e0c413  AST-005 unique lower(email)
   → c1a7e0b00001  booking idempotency keys          (feat/booking-idempotency)
   → c1a7e0b00002  pending expiry: bookings.expires_at, 'expired' status  (feat/pending-expiry)
-  → c1a7e0b00003  multi-seat (design only, §3)
+  → c1a7e0b00003  multi-seat: bookings.seats_requested  (feat/multi-seat-bookings, §3)
   → d5e1a0b00001… Milestone D (other branches; lead re-chains)
 ```
 
@@ -243,34 +243,136 @@ fails → 500 on any listing containing it), so:
 
 ---
 
-## 3. Multi-seat bookings — `c1a7e0b00003` (design only)
+## 3. Multi-seat bookings — `c1a7e0b00003` (implemented, `feat/multi-seat-bookings`)
 
-Not implemented in Milestone C. Design follows BOOKING_LIFECYCLE.md §6.4 with
-the chain position fixed:
+### Problem
+One booking = one seat (BOOKING_LIFECYCLE G5): a passenger travelling with a
+companion had to create two accounts, and the driver saw two unrelated requests.
 
-- Revision `c1a7e0b00003` (down `c1a7e0b00002`):
-  - `ALTER TABLE bookings ADD COLUMN seats smallint NOT NULL DEFAULT 1`
-    (PG ≥ 11 fast default, no rewrite).
-  - `ALTER TABLE rides ADD COLUMN total_seats integer NULL`.
-  - `CHECK (seats BETWEEN 1 AND 8) NOT VALID`, then `VALIDATE CONSTRAINT`
-    (SHARE UPDATE EXCLUSIVE; writes continue).
-- Backfill (separate, batched by 1 000 rides, re-runnable, outside the DDL
-  transaction): `total_seats = available_seats + count(accepted)` for
-  `active`/`completed` rides and `= available_seats` for `cancelled` rides
-  (their debits were reversed). Pre-flight query reports rides where the
-  result would be < `available_seats` (should be none).
-- `CHECK (available_seats <= total_seats) NOT VALID` + `VALIDATE` only after
-  the backfill; `SET NOT NULL` on `total_seats` one release later, after code
-  always writes it.
-- Code: `POST /bookings/{ride_id}` takes an optional body `{"seats": n}`
-  (absent = 1); request requires `available_seats >= seats`; `SEAT_EFFECT`
-  becomes `±booking.seats`; responses gain `seats`. The idempotency
-  fingerprint must then include `seats` (operation parameters already hash
-  the parsed inputs; add the field). The partial unique index stays: one live
-  booking per passenger per ride. Lock order unchanged.
-- Rollback: code revert is safe while every booking has `seats = 1`.
-  Downgrade pre-checks `SELECT count(*) FROM bookings WHERE seats <> 1` and
-  aborts with the count if non-zero; otherwise drops constraints and columns.
+### API (additive)
+- `POST /bookings/{ride_id}` takes an **optional** JSON body `{"seats": n}`.
+  - No body, `null`, `{}` or `{"seats": 1}` = 1 seat: the pre-existing contract is unchanged.
+  - `n` is a strict integer 1..8 (`"2"`, `2.0`, `true`, `null`, lists → 422).
+    Unknown fields → 422 (`extra="forbid"`). 422 bodies are the generic
+    schema messages from `validation_errors.py`: the submitted value is never echoed.
+  - `BOOKING_MAX_SEATS` (env, default 8, validated 1..8 at import) can lower the
+    bound at runtime: `n` above it → 422 `At most N seats per booking`.
+    Setting it to 1 switches multi-seat requests off without a code revert.
+  - Under the ride lock: `available_seats < 1` → 409 `No seats available`
+    (unchanged string); `1 ≤ available_seats < n` → 409 `Not enough seats available` (new).
+    A request still debits nothing.
+- `PATCH /bookings/{id}/respond?accept=true` debits `seats_requested`
+  atomically, re-checked under the Ride → Booking locks; the same two 409
+  strings apply (seats may have been taken since the request was made).
+- Every booking response (`BookingResponse`, `PassengerBookingResponse`,
+  `DriverBookingResponse`: create, respond, cancel, `/bookings/me`,
+  `/rides/{id}/bookings`) gains the required field `seats_requested`.
+  Clients that ignore unknown fields are unaffected.
+- Idempotency: the `booking.create` fingerprint includes `seats` **when it is
+  not 1**. Same key + different seat count → 422 `Idempotency-Key was already
+  used for a different request`; omitted and explicit `1` are the same request.
+  Keys stored before this change (which hashed `{"ride_id"}` only) still replay
+  for their 1-seat retry. Replays return the stored body, so a key stored
+  before this change replays a body **without** `seats_requested` (24 h TTL).
+
+### Seat accounting
+- `lifecycle.SEAT_EFFECT` is now a direction (−1 accept, +1 cancel of an
+  accepted booking) multiplied by `lifecycle.seat_count(booking)`. Every seat
+  change goes through `lifecycle.apply_booking_transition`, so each
+  restoration returns exactly what its acceptance took:
+  passenger cancel/withdraw, driver ride cancel, completion (pending only, no
+  seat change), lazy expiry and the sweep (no seat change), stale ride closure
+  (accepted seats kept).
+- Invariant (tested under `asyncio.gather` races on PostgreSQL):
+  `0 ≤ available_seats ≤ capacity` and
+  `Σ seats_requested(accepted) + available_seats = capacity`, where capacity is
+  the seats the ride was published with.
+- A static test (`test_no_seat_arithmetic_outside_lifecycle`) fails if any
+  non-test module writes `x.available_seats += / -=` outside `lifecycle.py`.
+  **Integration note:** #19 (`feat/account-suspension`,
+  `services/accounts.py`, `rides[booking.ride_id].available_seats += 1`) will
+  trip it; at re-chain replace that with
+  `lifecycle.apply_booking_transition(rides[booking.ride_id], booking, "cancel")`
+  (restores `seats_requested`).
+- Lock order unchanged: idempotency key → Ride → Booking.
+
+### Schema (`c1a7e0b00003`, down `c1a7e0b00002`)
+- `bookings.seats_requested integer NOT NULL DEFAULT 1` — constant default,
+  catalog-only on PG ≥ 11 (no rewrite; legacy rows read 1).
+- `ck_bookings_seats_requested_range CHECK (seats_requested >= 1 AND seats_requested <= 8)`
+  added `NOT VALID`, then `VALIDATE CONSTRAINT` (SHARE UPDATE EXCLUSIVE; writes continue).
+- Autocommit steps with `lock_timeout = 5s`; re-runnable (`ADD COLUMN IF NOT
+  EXISTS`, existing constraint reused, VALIDATE idempotent). A stray column of
+  another shape, or a same-named constraint with another definition, is refused
+  (`UnexpectedSeatsColumn`) and the stamp stays at `c1a7e0b00002`.
+- **No ride-level column.** The earlier design's `rides.total_seats`/`seats_total`
+  plus backfill is deferred: correctness does not need it (the counter is only
+  moved by known ± `seats_requested` under the ride lock, and
+  `ck_rides_available_seats_nonnegative` holds the lower bound), and a backfill
+  over legacy rides is the riskiest part of the design. Add it later as its own
+  additive revision if the UI needs "2 of 4 seats" or a DB-level upper bound.
+  The partial unique index stays: one live booking per passenger per ride.
+
+### Verified (disposable PostgreSQL 17.11)
+- `tests.test_migrations` (27): upgrade/downgrade/re-upgrade with legacy rows in
+  every status, `d924a6e38f10 → head → f6b2d8e0c413 → head`, failure part-way
+  (stray column; bad row blocking VALIDATE; foreign constraint definition; lock
+  timeout behind an open reader) with stamp left at `c1a7e0b00002` and a clean
+  retry, downgrade refusal.
+- Load check (`/workspace/work/rs_multiseat_load_check.py`, 800k bookings, a
+  concurrent writer using the old INSERT shape): upgrade 2.3 s, writer p99
+  11.7 ms / max 19.9 ms, 0 writer errors, relfilenode unchanged (no rewrite);
+  downgrade 1.9 s, p99 7.2 ms; re-upgrade clean.
+
+### Rollout
+1. Merge after #20 (and #18). Run `alembic upgrade head` (gate: migration approval).
+   Old code keeps working against the new column (DB default 1).
+2. Deploy the code. Frontend sends `{"seats": n}` only after the backend is live.
+3. Optional staged enablement: deploy with `BOOKING_MAX_SEATS=1` (gate: env
+   change), confirm, then raise to 8.
+
+### Rollback
+- **Data-loss risk.** Old code knows nothing of `seats_requested`: cancelling an
+  accepted 3-seat booking under old code restores 1 seat (2 seats permanently
+  lost from the ride), and dropping the column erases how many seats each booking held.
+- **Preferred: roll back code, keep the column.** First set
+  `BOOKING_MAX_SEATS=1` (no new multi-seat requests), then resolve live
+  multi-seat bookings:
+  `SELECT id, ride_id, status, seats_requested FROM bookings WHERE seats_requested > 1 AND status IN ('pending','accepted');`
+  (driver/passenger re-request as single seats or cancel under the new code),
+  then revert the code. The column is harmless to old code.
+- **Downgrade `c1a7e0b00003` refuses** (`MultiSeatDowngradeRefused`, nothing
+  changed, stamp stays) while **any** booking has `seats_requested <> 1`,
+  listing counts and seats per status. It locks `bookings` ACCESS EXCLUSIVE
+  (lock_timeout 5 s) for check + drop in one transaction, so no multi-seat row
+  can slip in. After the live rows are resolved, an operator who accepts losing
+  the seat history of terminal rows runs
+  `UPDATE bookings SET seats_requested = 1 WHERE seats_requested <> 1 AND status IN ('rejected','cancelled','expired');`
+  (and for accepted rows on completed rides, records the counts elsewhere
+  first), then re-runs the downgrade. Chosen over silent remapping because the
+  migration cannot know which loss is acceptable.
+
+### Frontend change (not in this PR; for the passenger/driver UI branches)
+- `frontend/src/api/types.ts`: add `seats_requested: number` to `Booking`,
+  `PassengerBooking`, `DriverBooking`.
+- `frontend/src/api/client.ts`: `bookRide(rideId, signal?, idempotencyKey?, seats = 1)`
+  sends `body: seats === 1 ? undefined : { seats }` (keeps the no-body request for 1 seat).
+- `pages/passenger/RideDetails.tsx`: seat selector (`<select>` or stepper,
+  label "Seats"), options `1..Math.min(ride.available_seats, 8)`, default 1,
+  hidden/disabled when `available_seats < 1`; fare line
+  `seats × fare_per_seat`; copy "Request N seat(s)". Changing the seat count
+  must **drop the pending idempotency key** for `book:${rideId}`
+  (scope e.g. `book:${rideId}:${seats}`), otherwise a retry with a new count is 422.
+  Map 409 `Not enough seats available` → "Only X seats are left — choose fewer
+  seats." and refetch the ride.
+- `pages/passenger/MyBookings.tsx`: show "N seats" on each booking card
+  (`seats_requested > 1`, or always).
+- `pages/driver/DriverRide.tsx` request list: show "N seats" per request; the
+  Accept button disabled with hint when `seats_requested > ride.available_seats`;
+  `driver/errors.ts` maps `Not enough seats available` → "This request needs
+  more seats than are left."
+- Tests: Vitest for the selector bounds (1..min(available,8)), body omitted for
+  1 seat, key scope change, the new 409 copy; one Playwright step booking 2 seats.
 
 ---
 

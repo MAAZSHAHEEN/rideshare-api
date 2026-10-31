@@ -52,6 +52,7 @@ async def list_my_bookings(
     return [PassengerBookingResponse(
         id=booking.id, ride_id=booking.ride_id, passenger_id=booking.passenger_id,
         status=booking_expiry.display_status(booking, ride, now),
+        seats_requested=booking.seats_requested,
         ride=RideResponse.model_validate(ride),
     ) for booking, ride in rows]
 
@@ -80,6 +81,7 @@ async def list_ride_bookings(
     return [DriverBookingResponse(
         id=booking.id, ride_id=booking.ride_id, passenger_id=booking.passenger_id,
         status=booking_expiry.display_status(booking, ride, now),
+        seats_requested=booking.seats_requested,
         passenger=PassengerSummary(id=user_id, name=name),
     ) for booking, user_id, name in rows]
 
@@ -140,11 +142,18 @@ async def book_ride(
     db: AsyncSession,
     current_user: User,
     before_commit: BeforeCommit | None = None,
+    seats: int = 1,
 ) -> Booking:
     try:
         # Passenger capability comes from the authenticated database account
         if "passenger" not in allowed_modes(current_user.role):
             raise HTTPException(status_code=403, detail="Only passengers can book rides")
+        # Before any lock. Defence in depth: the router's schema already bounds ``seats``.
+        if type(seats) is not int or not 1 <= seats <= lifecycle.HARD_MAX_SEATS:
+            raise ValueError("seats out of range")
+        if seats > lifecycle.MAX_SEATS:
+            raise HTTPException(status_code=422,
+                                detail=f"At most {lifecycle.MAX_SEATS} seats per booking")
 
         # Lock the ride row for the duration of this transaction to prevent
         # concurrent requests from double-booking the last seat.
@@ -162,10 +171,10 @@ async def book_ride(
         # Evaluated after the row lock so a request that waited on a concurrent
         # transaction is judged against the time it actually proceeds.
         lifecycle.require_not_departed(ride)
-        # A request does not debit a seat (acceptance does), but there is no
-        # point queueing one for a ride that is already full.
-        if ride.available_seats < 1:
-            raise lifecycle.conflict(lifecycle.NO_SEATS)
+        # A request does not debit seats (acceptance does), but there is no
+        # point queueing one the ride cannot currently hold. Acceptance
+        # re-checks under the ride lock, since seats may be taken meanwhile.
+        lifecycle.require_seats_available(ride, seats)
 
         # A passenger's own expired request no longer blocks a new one.
         now = clock.utc_now()
@@ -186,6 +195,7 @@ async def book_ride(
             ride_id=ride_id,
             passenger_id=current_user.id,
             expires_at=booking_expiry.pending_expires_at(now, ride.departure_time),
+            seats_requested=seats,
         )
         db.add(booking)
         if before_commit is not None:
@@ -270,7 +280,8 @@ async def respond_to_booking(
             # Lazy expiry: never depends on the sweep having run.
             if booking_expiry.is_expired(booking, ride):
                 raise lifecycle.conflict(lifecycle.BOOKING_EXPIRED)
-        # Debits one seat on acceptance; 409 "No seats available" if none left.
+        # Debits seats_requested on acceptance; 409 "No seats available" when
+        # none are left, "Not enough seats available" when too few are.
         lifecycle.apply_booking_transition(ride, booking, action)
         if before_commit is not None:
             await before_commit(booking)
