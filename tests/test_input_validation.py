@@ -34,7 +34,7 @@ with patch.dict(os.environ, {
     from routers.dependencies import get_current_user
     from schemas import (
         CNIC_ERROR, FARE_PER_SEAT_MAX, NAME_MAX_LENGTH, PHONE_ERROR, PLACE_MAX_LENGTH,
-        RIDE_SEATS_MAX, SAME_PLACE_ERROR, RideCreate, UserCreate, normalize_cnic,
+        RIDE_SEATS_MAX, SAME_PLACE_ERROR, RideCreate, UserCreate, clean_text, normalize_cnic,
         normalize_pk_mobile,
     )
 
@@ -119,6 +119,17 @@ class NormalisationTests(unittest.TestCase):
         text = repr(user) + str(user)
         for secret in (FAKE_CNIC_CANONICAL, FAKE_PHONE_E164, "Test-password-123!"):
             self.assertNotIn(secret, text)
+
+    def test_invisible_display_spoofing_characters_are_rejected(self):
+        for char in ("\u202e", "\u202a", "\u2066", "\u2069", "\u200b", "\u2060", "\ufeff", "\u180e"):
+            with self.subTest(char=hex(ord(char))):
+                with self.assertRaisesRegex(ValueError, "control characters"):
+                    clean_text(f"Fake{char}Name")
+        # Ordinary Urdu text uses ZWNJ/ZWJ and directional marks; keep accepting them.
+        for value in ("\u0639\u0644\u06cc\u200c\u0631\u0636\u0627", "Fake\u200dName",
+                      "Lahore \u200f\u0644\u0627\u06c1\u0648\u0631"):
+            with self.subTest(value=value):
+                self.assertEqual(clean_text(value), value)
 
     def test_ride_bounds_and_places(self):
         self.assertEqual(RideCreate(**ride(available_seats=RIDE_SEATS_MAX,
@@ -216,7 +227,8 @@ class SanitisedErrorTests(unittest.IsolatedAsyncioTestCase):
             "type": "string_too_long", "loc": ["body", "name"],
             "msg": f"String should have at most {NAME_MAX_LENGTH} characters"}])
         for name, msg in (("   ", "Value error, Value must not be blank"),
-                          ("Fake\x1bName", "Value error, Value must not contain control characters")):
+                          ("Fake\x1bName", "Value error, Value must not contain control characters"),
+                          ("Fake\u202eemaN", "Value error, Value must not contain control characters")):
             with self.subTest(name=name):
                 response = await self.client.post("/auth/register", json=registration(name=name))
                 self.assert_safe_422(response, [], [

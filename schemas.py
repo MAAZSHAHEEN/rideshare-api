@@ -26,7 +26,15 @@ SAME_PLACE_ERROR = "Origin and destination must be different"
 _CNIC_PATTERN = re.compile(r"[0-9]{13}|[0-9]{5}-[0-9]{7}-[0-9]")
 _PHONE_PATTERN = re.compile(r"(?:0|\+92|92)(3[0-9]{9})")
 _PHONE_SEPARATORS = re.compile(r"[ -]")
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# C0/C1 controls, plus invisible characters that spoof how a name or place is
+# displayed to other users: bidi embeddings/overrides/isolates (U+202A-202E,
+# U+2066-2069, the "Trojan Source" set), zero-width space U+200B, word joiner
+# U+2060, invisible operators U+2061-2064, BOM U+FEFF and Mongolian vowel
+# separator U+180E. ZWNJ/ZWJ (U+200C/U+200D) and LRM/RLM (U+200E/U+200F) stay
+# allowed: Urdu and other scripts use them in ordinary names.
+_CONTROL_CHARS = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u180e\u200b\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
 
 
 def normalize_cnic(value: str) -> str:
