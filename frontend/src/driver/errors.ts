@@ -6,6 +6,8 @@ export type DriverAction = 'create' | 'load-rides' | 'load-ride' | 'load-request
 
 // Known server details (services/bookings.py, services/rides.py, lifecycle.py and
 // PR #2's departure guard). Anything else gets generic copy: server text is never shown raw.
+/** R-1: driver-facing copy for a booking that was cancelled (by its passenger or by a suspension). */
+export const BOOKING_UNAVAILABLE = 'This booking is no longer available.';
 const ACCEPT_CONFLICTS: Record<string, string> = {
   'No seats available': 'No seats are left on this ride, so this request can’t be accepted. Requests and seats have been refreshed.',
   // c1a7e0b00003: some seats remain, but fewer than this request needs.
@@ -13,15 +15,22 @@ const ACCEPT_CONFLICTS: Record<string, string> = {
   'Ride has already departed': 'This ride has already departed, so requests can no longer be accepted.',
   // The server still sends this for accepted/rejected requests and for requests cancelled with their ride.
   'Booking already responded to': 'This request was already answered. The list has been refreshed with its current status.',
-  // D7 (PR #17): a pending request the passenger withdrew while the ride is still active.
-  'Booking was cancelled by the passenger': 'The passenger withdrew this request, so it can’t be answered. The list has been refreshed.',
+  // D7 (PR #17): the booking was cancelled while the ride is still active. That is
+  // either the passenger withdrawing it or an admin suspension cancelling it (R-1),
+  // so the driver gets neutral copy that says neither (Maaz's decision, 31 Oct).
+  'Booking was cancelled by the passenger': BOOKING_UNAVAILABLE,
+  // R-1 (fix-be on #17) may send the neutral detail itself.
+  'This booking is no longer available': BOOKING_UNAVAILABLE,
+  'This booking is no longer available.': BOOKING_UNAVAILABLE,
   'Ride is not active': 'This ride is no longer active (it was cancelled or completed), so requests can’t be answered.',
   // PR #20 (pending expiry): the request timed out before it was answered.
   'Booking request has expired': 'This request expired before it was answered, so it can’t be accepted. The list has been refreshed.',
 };
 const REJECT_CONFLICTS: Record<string, string> = {
   'Booking already responded to': ACCEPT_CONFLICTS['Booking already responded to'],
-  'Booking was cancelled by the passenger': ACCEPT_CONFLICTS['Booking was cancelled by the passenger'],
+  'Booking was cancelled by the passenger': BOOKING_UNAVAILABLE,
+  'This booking is no longer available': BOOKING_UNAVAILABLE,
+  'This booking is no longer available.': BOOKING_UNAVAILABLE,
   'Booking request has expired': 'This request has expired. The list has been refreshed with its current status.',
   'Ride is not active': ACCEPT_CONFLICTS['Ride is not active'],
 };

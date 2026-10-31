@@ -113,7 +113,7 @@ test.describe('live disposable backend: API-gap adoption', () => {
     await expect(p2.page.getByRole('status').filter({ hasText: 'Booking cancelled' })).toBeVisible();
     // The driver's list is stale (still shows Bilal pending): accepting now gets the D7 409.
     await page.getByRole('button', { name: 'Accept request from Bilal Test' }).click();
-    await expect(page.getByRole('alert')).toHaveText('The passenger withdrew this request, so it can’t be answered. The list has been refreshed.');
+    await expect(page.getByRole('alert')).toHaveText('This booking is no longer available.');
     await expect(page.getByText('0 pending · 1 accepted')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Accept request from Bilal Test' })).toHaveCount(0);
 

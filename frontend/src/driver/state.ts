@@ -52,7 +52,7 @@ export const BOOKING_HELP: Record<BookingStatus, string> = {
   pending: 'Waiting for your answer.',
   accepted: 'Seat confirmed. Each accepted request uses one seat.',
   rejected: 'You declined these requests.',
-  cancelled: 'Withdrawn by the passenger, or cancelled with the ride.',
+  cancelled: 'No longer available: withdrawn, or cancelled with the ride.',
   expired: 'Not answered in time, or still pending at departure. Read-only.',
 };
 
