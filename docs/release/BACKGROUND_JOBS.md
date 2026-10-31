@@ -183,3 +183,10 @@ async def job_lock(engine: AsyncEngine, job: str):
 
 Behaviour change visible to callers: the CLI output gains a first line `job_lock=acquired` (or is only
 `job_lock=skipped`). The existing subprocess tests check for contained lines and still pass.
+
+## 9. Continued in SCHEDULER_AND_OPS.md
+
+Decision, retry/backoff, the exit-code + summary-line contract, the crash / `kill -9` /
+connection-drop recovery evidence (PR #26 `tests/test_job_recovery.py`), alerting, RACI and the
+inactive workflow file are in [SCHEDULER_AND_OPS.md](SCHEDULER_AND_OPS.md). Where the two differ
+(the workflow in §2.1 above vs `workflows/maintenance-jobs.yml`), SCHEDULER_AND_OPS wins.
