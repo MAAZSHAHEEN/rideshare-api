@@ -61,6 +61,8 @@ class BookingStatus(str, enum.Enum):
     accepted  = "accepted"
     rejected  = "rejected"
     cancelled = "cancelled"
+    # Added by c1a7e0b00002. Terminal: a pending request past its expiry.
+    expired   = "expired"
 
 
 class Booking(Base):
@@ -74,6 +76,9 @@ class Booking(Base):
         # created by e3a7c41b9f52.
         Index('ix_bookings_passenger_id_id', 'passenger_id', 'id'),
         Index('ix_bookings_ride_id_id', 'ride_id', 'id'),
+        # Expiry sweep; created CONCURRENTLY by c1a7e0b00002.
+        Index('ix_bookings_pending_expires_at', 'expires_at',
+              postgresql_where=text("status = 'pending'")),
     )
 
     id         = Column(Integer, primary_key=True)
@@ -81,6 +86,8 @@ class Booking(Base):
     passenger_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     status     = Column(SAEnum(BookingStatus), nullable=False, default=BookingStatus.pending)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # c1a7e0b00002. NULL = legacy request: expires at the ride's departure.
+    expires_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class IdempotencyKey(Base):

@@ -32,7 +32,7 @@ with patch.dict(os.environ, {
     from models import Base
 
 
-HEAD = "c1a7e0b00001"
+HEAD = "c1a7e0b00002"
 # Milestone C objects absent before HEAD's chain (stripped for older revisions).
 MILESTONE_C_TABLES = ("idempotency_keys",)
 
@@ -107,7 +107,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as connection:
             return await connection.run_sync(inspect_schema)
 
-    async def assert_metadata_matches(self, metadata=None, revision_id=HEAD):
+    async def assert_metadata_matches(self, metadata=None, revision_id=HEAD, enum_residue=False):
         metadata = metadata if metadata is not None else Base.metadata
 
         def compare(connection):
@@ -135,7 +135,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                     predicate = index.dialect_options["postgresql"].get("where")
                     if predicate is not None:
                         actual = reflected_indexes[index.name]
-                        self.assertTrue(actual["unique"])
+                        self.assertEqual(actual["unique"], bool(index.unique))
                         self.assertEqual(actual["column_names"], [column.name for column in index.columns])
                         reflected_predicate = actual["dialect_options"]["postgresql_where"]
                         self.assertEqual(
@@ -155,6 +155,10 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
             for table in metadata.tables.values()
             for column in table.columns if isinstance(column.type, Enum)
         }
+        if enum_residue:
+            # Downgrading c1a7e0b00002 cannot drop an enum label (PostgreSQL);
+            # the unused 'expired' label is left behind by design.
+            expected_enums["bookingstatus"] = [*expected_enums["bookingstatus"], "expired"]
         self.assertEqual(state["enums"], expected_enums)
         self.assertEqual(state["sequences"], {"users_id_seq", "rides_id_seq", "bookings_id_seq"})
         return state
@@ -165,10 +169,23 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                      "ix_bookings_ride_id_id": ["ride_id", "id"]},
     }
 
+    def c1a7_0001_metadata(self):
+        """Schema at c1a7e0b00001, before pending expiry (c1a7e0b00002)."""
+        metadata = MetaData()
+        for table in Base.metadata.sorted_tables:
+            historical = table.to_metadata(metadata)
+            if table.name == "bookings":
+                historical._columns.remove(historical.c.expires_at)
+                historical.indexes = {index for index in historical.indexes
+                                      if index.name != "ix_bookings_pending_expires_at"}
+                historical.c.status.type = Enum("pending", "accepted", "rejected", "cancelled",
+                                                name="bookingstatus")
+        return metadata
+
     def f6b2_metadata(self):
         """Schema at f6b2d8e0c413, before any Milestone C revision."""
         metadata = MetaData()
-        for table in Base.metadata.sorted_tables:
+        for table in self.c1a7_0001_metadata().sorted_tables:
             if table.name not in MILESTONE_C_TABLES:
                 table.to_metadata(metadata)
         return metadata
@@ -576,9 +593,13 @@ with patch.object(MetaData, 'create_all', side_effect=AssertionError('startup ca
         """)
 
     async def table_rows(self):
+        # Legacy columns only, so rows compare across revisions that add columns.
+        columns = {"users": "*", "rides": "*",
+                   "bookings": "id, ride_id, passenger_id, status::text, created_at"}
         async with self.engine.connect() as connection:
-            return {table: (await connection.execute(text(f"SELECT * FROM {table} ORDER BY id"))).all()
-                    for table in ("users", "rides", "bookings")}
+            return {table: (await connection.execute(text(
+                        f"SELECT {selected} FROM {table} ORDER BY id"))).all()
+                    for table, selected in columns.items()}
 
     async def test_idempotency_table_upgrade_downgrade_reupgrade_keeps_legacy_rows(self):
         await self.prepare_integrity_data("f6b2d8e0c413")
@@ -586,7 +607,7 @@ with patch.object(MetaData, 'create_all', side_effect=AssertionError('startup ca
         before = await self.table_rows()
         for attempt in range(2):
             await self.run_python("-m", "alembic", "upgrade", "c1a7e0b00001")
-            await self.assert_metadata_matches(revision_id="c1a7e0b00001")
+            await self.assert_metadata_matches(self.c1a7_0001_metadata(), "c1a7e0b00001")
             self.assertEqual(await self.table_rows(), before)
             await self.execute_sql("""
                 INSERT INTO idempotency_keys (user_id, key, operation, request_hash,
@@ -617,7 +638,7 @@ with patch.object(MetaData, 'create_all', side_effect=AssertionError('startup ca
         head_schema = await self.assert_metadata_matches()
         self.assertEqual(await self.table_rows(), before)
         await self.run_python("-m", "alembic", "downgrade", "f6b2d8e0c413")
-        await self.assert_metadata_matches(self.f6b2_metadata(), "f6b2d8e0c413")
+        await self.assert_metadata_matches(self.f6b2_metadata(), "f6b2d8e0c413", enum_residue=True)
         await self.run_python("-m", "alembic", "upgrade", "head")
         self.assertEqual(await self.assert_metadata_matches(), head_schema)
         self.assertEqual(await self.table_rows(), before)
@@ -655,6 +676,110 @@ with patch.object(MetaData, 'create_all', side_effect=AssertionError('startup ca
             self.assertIn(expected, output)
         async with self.engine.connect() as connection:
             self.assertEqual((await connection.execute(text("SELECT key FROM idempotency_keys"))).scalars().all(), ["live"])
+
+    # --- Milestone C: c1a7e0b00002 pending expiry ------------------------------
+
+    async def expiry_index_state(self):
+        async with self.engine.connect() as connection:
+            return (await connection.execute(text("""
+                SELECT i.indisvalid, pg_get_expr(i.indpred, i.indrelid) FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indexrelid
+                WHERE c.relname = 'ix_bookings_pending_expires_at'
+            """))).all()
+
+    async def test_pending_expiry_upgrade_downgrade_reupgrade_keeps_legacy_rows(self):
+        await self.prepare_integrity_data("c1a7e0b00001")
+        await self.seed_legacy_bookings()
+        before = await self.table_rows()
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "c1a7e0b00002")
+            await self.assert_metadata_matches()
+            self.assertEqual(await self.table_rows(), before)
+            async with self.engine.connect() as connection:
+                self.assertEqual(await connection.scalar(text(
+                    "SELECT count(*) FROM bookings WHERE expires_at IS NOT NULL")), 0)
+            self.assertEqual(await self.expiry_index_state(),
+                             [(True, "(status = 'pending'::bookingstatus)")])
+            # The new label is usable and terminal rows are allowed alongside live ones.
+            await self.execute_sql("""
+                INSERT INTO bookings (ride_id, passenger_id, status, expires_at)
+                VALUES (1, 2, 'expired', now())
+            """)
+            await self.run_python("-m", "alembic", "downgrade", "c1a7e0b00001")
+            await self.assert_metadata_matches(self.c1a7_0001_metadata(), "c1a7e0b00001",
+                                               enum_residue=True)
+            async with self.engine.connect() as connection:
+                mapped = (await connection.execute(text(
+                    "SELECT status::text FROM bookings WHERE id > 4 ORDER BY id"))).scalars().all()
+            self.assertEqual(mapped, ["cancelled"])
+            await self.execute_sql("DELETE FROM bookings WHERE id > 4")
+            self.assertEqual(await self.table_rows(), before)
+            self.assertEqual(await self.expiry_index_state(), [])
+
+    async def test_multi_revision_upgrade_failing_in_expiry_revision_keeps_earlier_stamps(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        await self.seed_legacy_bookings()
+        # A stray column of the wrong type: c1a7e0b00002 must refuse, not adopt it.
+        await self.execute_sql("ALTER TABLE bookings ADD COLUMN expires_at text")
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("UnexpectedExpiresAtColumn", output)
+        async with self.engine.connect() as connection:
+            self.assertEqual(await connection.scalar(text("SELECT version_num FROM alembic_version")),
+                             "c1a7e0b00001")
+            self.assertEqual(await connection.scalar(text(
+                "SELECT to_regclass('idempotency_keys') IS NOT NULL")), True)
+        await self.execute_sql("ALTER TABLE bookings DROP COLUMN expires_at")
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        await self.assert_metadata_matches()
+
+    async def test_expiry_upgrade_reruns_after_interrupted_concurrent_build(self):
+        await self.prepare_integrity_data("c1a7e0b00001")
+        await self.seed_legacy_bookings()
+        # Simulate a run interrupted after the column, label and a failed
+        # CREATE INDEX CONCURRENTLY (INVALID index left behind).
+        await self.execute_sql("ALTER TABLE bookings ADD COLUMN expires_at timestamptz")
+        autocommit = create_async_engine(self.url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
+        try:
+            async with autocommit.connect() as connection:
+                await connection.exec_driver_sql("ALTER TYPE bookingstatus ADD VALUE 'expired'")
+        finally:
+            await autocommit.dispose()
+        await self.execute_sql("CREATE INDEX ix_bookings_pending_expires_at ON bookings (expires_at) "
+                               "WHERE status = 'pending'")
+        await self.execute_sql("""UPDATE pg_index SET indisvalid = false
+            WHERE indexrelid = 'ix_bookings_pending_expires_at'::regclass""")
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        await self.assert_metadata_matches()
+        self.assertEqual(await self.expiry_index_state(),
+                         [(True, "(status = 'pending'::bookingstatus)")])
+
+    async def test_expiry_job_cli_against_migrated_database(self):
+        await self.prepare_integrity_data("head")
+        await self.seed_legacy_bookings()   # ride 1 departs tomorrow
+        await self.execute_sql("UPDATE bookings SET expires_at = now() - interval '1 minute' WHERE id = 1")
+        await self.execute_sql("""
+            INSERT INTO rides (id, driver_id, origin, destination, departure_time,
+                               available_seats, fare_per_seat, status)
+            VALUES (2, 1, 'Lahore', 'Islamabad', now() - interval '3 days', 1, 900, 'active'),
+                   (3, 1, 'Lahore', 'Islamabad', now() - interval '3 days', 2, 900, 'active')
+        """)
+        await self.execute_sql("""
+            INSERT INTO bookings (ride_id, passenger_id, status)
+            VALUES (2, 3, 'accepted'), (2, 4, 'pending'), (3, 4, 'pending')
+        """)
+        output = await self.run_python("-m", "jobs.expire_bookings")
+        for line in ("expired_requests=3", "rides_completed=1", "rides_cancelled=1"):
+            self.assertIn(line, output)
+        output = await self.run_python("-m", "jobs.expire_bookings")
+        self.assertIn("expired_requests=0\nrides_completed=0\nrides_cancelled=0", output)
+        async with self.engine.connect() as connection:
+            rows = (await connection.execute(text(
+                "SELECT id, status::text, available_seats FROM rides ORDER BY id"))).all()
+            self.assertEqual(rows, [(1, "active", 2), (2, "completed", 1), (3, "cancelled", 2)])
+            statuses = (await connection.execute(text(
+                "SELECT status::text FROM bookings ORDER BY id"))).scalars().all()
+            self.assertEqual(statuses, ["expired", "accepted", "rejected", "cancelled",
+                                        "accepted", "expired", "expired"])
 
 if __name__ == "__main__":
     unittest.main()

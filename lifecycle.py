@@ -20,7 +20,7 @@ import clock
 from models import BookingStatus, Ride, RideStatus
 
 RideAction = Literal["complete", "cancel"]
-BookingAction = Literal["accept", "reject", "cancel"]
+BookingAction = Literal["accept", "reject", "cancel", "expire"]
 
 # 409 detail strings. Unchanged from the pre-AST-015 services (API contract).
 RIDE_NOT_ACTIVE = "Ride is not active"
@@ -28,6 +28,7 @@ RIDE_DEPARTED = "Ride has already departed"
 NO_SEATS = "No seats available"
 ALREADY_RESPONDED = "Booking already responded to"
 NOT_CANCELLABLE = "Booking cannot be cancelled"
+BOOKING_EXPIRED = "Booking request has expired"  # c1a7e0b00002, see booking_expiry.py
 
 RIDE_TRANSITIONS: dict[tuple[RideStatus, RideAction], RideStatus] = {
     (RideStatus.active, "complete"): RideStatus.completed,
@@ -41,6 +42,8 @@ BOOKING_TRANSITIONS: dict[tuple[BookingStatus, BookingAction], BookingStatus] = 
     (BookingStatus.pending, "reject"): BookingStatus.rejected,
     (BookingStatus.pending, "cancel"): BookingStatus.cancelled,
     (BookingStatus.accepted, "cancel"): BookingStatus.cancelled,
+    # Pending-request expiry (booking_expiry.py): system only, no seat effect.
+    (BookingStatus.pending, "expire"): BookingStatus.expired,
 }
 
 # Change to ride.available_seats for each allowed booking transition. A seat is
@@ -54,6 +57,7 @@ _BOOKING_CONFLICT: dict[BookingAction, str] = {
     "accept": ALREADY_RESPONDED,
     "reject": ALREADY_RESPONDED,
     "cancel": NOT_CANCELLABLE,
+    "expire": ALREADY_RESPONDED,
 }
 
 

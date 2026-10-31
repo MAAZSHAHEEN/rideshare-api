@@ -24,7 +24,7 @@ part-way keeps every earlier revision and is retried by re-running
 
 ---
 
-## 1. Idempotency keys — `c1a7e0b00001` (implemented)
+## 1. Idempotency keys — `c1a7e0b00001` (implemented, PR #18)
 
 ### Problem
 A client that retries `POST /bookings/{ride_id}` after a timeout gets
@@ -130,10 +130,116 @@ the table).
 
 ---
 
-## 2. Pending-request expiry and stale ride closure — `c1a7e0b00002`
+## 2. Pending-request expiry and stale ride closure — `c1a7e0b00002` (implemented)
 
-Implemented on the stacked branch `feat/pending-expiry`; that branch's copy of
-this document carries the full section.
+### Problem
+Pending requests never expired (gap G4): passengers waited until departure.
+Departed rides stayed `active` forever (gap G3).
+
+### Rules
+- New request: `expires_at = min(now + BOOKING_PENDING_TTL_MINUTES, departure_time)`
+  (default 360 min = 6 h; allowed 5–10 080; validated at import).
+- Legacy rows: `expires_at IS NULL` = "expires at departure" — exactly the rule
+  that already applied (accept after departure was 409). No row is backfilled,
+  so no existing request changes meaning on deploy.
+- Effective expiry = `min(coalesce(expires_at, departure_time), departure_time)`;
+  boundary inclusive (expired **at** the instant), like `clock.has_departed`.
+  All comparisons use `clock.utc_now()` (application clock, UTC instants).
+- New terminal booking status `expired` (`pending → expired`, no seat effect,
+  no exits). Lifecycle table: `(pending, "expire") → expired` in `lifecycle.py`.
+
+### Enforcement (lazy — never depends on the sweep)
+| Path | Behaviour |
+|---|---|
+| `PATCH /bookings/{id}/respond?accept=true` | after the ride lock: booking state → ride active → departed (`Ride has already departed`, unchanged) → **expired → 409 `Booking request has expired`** → seats. No write. |
+| `…?accept=false` (reject) | still allowed on an expired-but-unswept request (driver clears it) |
+| `PATCH /bookings/{id}/cancel` (pending) | still allowed (passenger withdraws) |
+| any action on a persisted `expired` booking | 409 `Booking already responded to` / `Booking cannot be cancelled` (terminal) |
+| `POST /bookings/{ride_id}` | under the ride lock, the passenger's own due request on that ride becomes `expired` in the same transaction, then the new request is created — so an expired request no longer blocks re-requesting. A live one still gets 409 `You already booked this ride`. |
+| `GET /bookings/me`, `GET /rides/{id}/bookings` | a due pending request is **shown** as `expired` (read-only; GET never writes). `?status=expired` includes them; `?status=pending` excludes them. |
+
+`expires_at` is **not** yet in API responses (keeps the listing contract and
+tests of other open branches stable); adding it is additive.
+
+### Sweep — `python -m jobs.expire_bookings [--batch-size N]`
+1. Stale rides: `status = 'active' AND departure_time <= now − RIDE_AUTO_CLOSE_AFTER_HOURS`
+   (default 24 h, allowed 1–720). Per ride, one transaction: lock ride
+   `FOR UPDATE SKIP LOCKED`, re-check status and departure, lock its pending
+   and accepted bookings `ORDER BY id`, pending → `expired`; ride →
+   `completed` if it has ≥ 1 accepted booking, else `cancelled`. Accepted
+   bookings and `available_seats` are untouched (same as a manual completion;
+   a cancel with no accepted booking restores nothing). Completion only ever
+   happens after departure (product rule, 31 Oct).
+2. Due requests: pending with `expires_at <= now`, or legacy NULL on a
+   departed ride. Per ride: lock ride `SKIP LOCKED`, lock due bookings by id,
+   → `expired`.
+- Lock order Ride → Booking like every writer; SKIP LOCKED means the sweep
+  never waits behind, or blocks, a user request; skipped rides are counted
+  (`rides_skipped_locked`) and handled by the next run.
+- Idempotent: a re-run prints all zeros. Output: `expired_requests=`,
+  `rides_completed=`, `rides_cancelled=`, `rides_skipped_locked=`.
+- Status names: no new **ride** status. `completed`/`cancelled` already exist
+  in `ridestatus`; the only DB CHECK constraints (`7c2e9a4b6d10`) are
+  `available_seats >= 0` and `fare_per_seat >= 0`, which the sweep never
+  changes. Without `closed_by`/`closed_at` columns the UI cannot tell an
+  automatic closure from a driver's; those columns are a later additive
+  revision if wanted.
+
+### Schema (`c1a7e0b00002`, down `c1a7e0b00001`)
+- `ALTER TABLE bookings ADD COLUMN IF NOT EXISTS expires_at timestamptz NULL`
+  — metadata-only; then a type check that refuses a stray column of another
+  shape (`UnexpectedExpiresAtColumn`).
+- `ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'expired'` (autocommit).
+- Both under `lock_timeout = 5s` so the brief ACCESS EXCLUSIVE lock can't queue
+  behind a long transaction and stall traffic; on timeout just re-run.
+- `CREATE INDEX CONCURRENTLY ix_bookings_pending_expires_at ON bookings
+  (expires_at) WHERE status = 'pending'` — re-runnable (valid index kept,
+  INVALID one dropped concurrently and rebuilt), same pattern as `e3a7`.
+
+### Verified (disposable PostgreSQL 17.11)
+- Upgrade `c1a7e0b00001 → c1a7e0b00002`, downgrade, re-upgrade with legacy
+  bookings in every status: legacy columns byte-identical, `expires_at` all
+  NULL, index valid with predicate `status = 'pending'`.
+- `d924a6e38f10 → head → downgrade f6b2d8e0c413 → head`: identical schema.
+- Multi-revision upgrade failing in `c1a7e0b00002` (stray `expires_at text`):
+  stops at `c1a7e0b00001` with the idempotency table committed; retry after
+  dropping the stray column reaches head.
+- Interrupted concurrent build (INVALID index, column and label already
+  present) repaired by re-running `alembic upgrade head`.
+- Load check (`/workspace/work/rs_expiry_load_check.py`): see the PR body for
+  the measured write latencies during upgrade and downgrade.
+
+### Rollout
+1. Merge after `c1a7e0b00001` (approval gate).
+2. **Frontend first or together:** passenger/driver UIs must render an
+   unknown/`expired` status (the open UI branches type `BookingStatus` as four
+   values and look labels up in a fixed map) and map the new 409 detail
+   `Booking request has expired`.
+3. Staging Neon branch (approval): `alembic upgrade head`. Check
+   `indisvalid` for `ix_bookings_pending_expires_at`; no long transactions on
+   `bookings` while it runs (CONCURRENTLY waits for them).
+4. Deploy code. Effects are immediate and lazy; no job is needed.
+5. Optionally (approval): schedule the sweep (§4), first with
+   `RIDE_AUTO_CLOSE_AFTER_HOURS` at its default.
+
+Order: migration **before** code (code selects `expires_at`; without the
+column every booking endpoint 500s).
+
+### Rollback
+Old code cannot read a row whose status is `expired` (SQLAlchemy enum lookup
+fails → 500 on any listing containing it), so:
+1. Stop the sweep if it was scheduled.
+2. `UPDATE bookings SET status = 'cancelled' WHERE status = 'expired';`
+   (idempotent; needs approval on production).
+3. Revert the code. Old code ignores `expires_at` (not in its model), so the
+   column may stay.
+4. Re-run step 2 (catches requests a re-request expired in between), then
+   `alembic downgrade c1a7e0b00001`: maps any remaining `expired` →
+   `cancelled`, drops the index (concurrently) and the column.
+- The `expired` enum label stays in the type (PostgreSQL cannot drop it);
+  harmless, and re-upgrade is a no-op for it.
+- Rides closed by the sweep stay `completed`/`cancelled` — valid states for
+  old code; reopening them is not offered (no approval-free undo for that).
 
 ---
 
