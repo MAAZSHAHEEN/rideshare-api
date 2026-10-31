@@ -4,7 +4,9 @@ Uses DATABASE_URL like the app. Idempotent; safe while the API serves traffic
 (batches of --batch-size rows, SKIP LOCKED, one commit per batch) and
 single-runner (advisory lock, jobs/locking.py; a concurrent copy prints
 ``job_lock=skipped``). Prints the
-number of rows deleted; exits 0 on success.
+number of rows deleted, then one structured summary line
+(``job=purge_idempotency_keys status=ok purged=N duration_ms=D``, see
+jobs/reporting.py); exits 0 on success or skip, 1 on failure.
 """
 
 import argparse
@@ -13,6 +15,9 @@ import asyncio
 import database
 import idempotency
 from jobs.locking import job_lock
+from jobs.reporting import Timer, report_failure, summary
+
+JOB = "purge_idempotency_keys"
 
 SKIPPED_LINE = "job_lock=skipped"
 
@@ -38,14 +43,19 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not 1 <= args.batch_size <= 10000:
         parser.error("--batch-size must be between 1 and 10000")
-    deleted = asyncio.run(run(args.batch_size))
+    timer = Timer()
+    try:
+        deleted = asyncio.run(run(args.batch_size))
+    except Exception as exc:  # report, exit non-zero; committed batches stay committed
+        return report_failure(JOB, timer, exc)
     if deleted is None:
         print(SKIPPED_LINE)  # another run holds the lock; not an error
+        print(summary(JOB, "skipped", timer))
         return 0
     print("job_lock=acquired")
     print(f"purged_idempotency_keys={deleted}")
+    print(summary(JOB, "ok", timer, purged=deleted))
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

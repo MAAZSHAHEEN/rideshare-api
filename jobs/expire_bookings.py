@@ -4,7 +4,9 @@ Uses DATABASE_URL like the app. Idempotent (a re-run changes nothing new) and
 safe while the API serves traffic and single-runner (advisory lock,
 jobs/locking.py; a concurrent copy prints ``job_lock=skipped``): one short transaction per ride, ride locks
 taken with SKIP LOCKED in the usual Ride -> Booking order. Prints one
-``name=value`` line per counter; exits 0 on success. Not scheduled anywhere:
+``name=value`` line per counter, then one structured summary line
+(``job=expire_bookings status=ok expired=N closed=M duration_ms=D``, see
+jobs/reporting.py); exits 0 on success or skip, 1 on failure. Not scheduled anywhere:
 see docs/architecture/BOOKING_SCHEMA_CHANGES.md §4.
 
 Settings (optional env vars, validated at import):
@@ -18,6 +20,9 @@ import asyncio
 import booking_expiry
 import database
 from jobs.locking import job_lock
+from jobs.reporting import Timer, report_failure, summary
+
+JOB = "expire_bookings"
 
 SKIPPED_LINE = "job_lock=skipped"
 
@@ -43,13 +48,20 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not 1 <= args.batch_size <= 1000:
         parser.error("--batch-size must be between 1 and 1000")
-    result = asyncio.run(run(args.batch_size))
+    timer = Timer()
+    try:
+        result = asyncio.run(run(args.batch_size))
+    except Exception as exc:  # report, exit non-zero; committed batches stay committed
+        return report_failure(JOB, timer, exc)
     if result is None:
         print(SKIPPED_LINE)  # another run holds the lock; not an error
+        print(summary(JOB, "skipped", timer))
         return 0
     print("\n".join(["job_lock=acquired", *result.as_lines()]))
+    print(summary(JOB, "ok", timer, expired=result.expired_requests,
+                  closed=result.rides_completed + result.rides_cancelled,
+                  skipped_locked=result.rides_skipped_locked))
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

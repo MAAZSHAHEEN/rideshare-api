@@ -207,7 +207,10 @@ class JobLockTests(unittest.IsolatedAsyncioTestCase):
                     subprocess.run, [sys.executable, "-B", "-m", module], cwd=ROOT, env=env,
                     capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout.strip(), "job_lock=skipped")
+                lines = result.stdout.strip().splitlines()
+                self.assertEqual(lines[0], "job_lock=skipped")
+                self.assertRegex(lines[-1], rf"^job={module.split('.')[1]} status=skipped duration_ms=\d+$")
+                self.assertEqual(len(lines), 2)
 
 
 if __name__ == "__main__":
