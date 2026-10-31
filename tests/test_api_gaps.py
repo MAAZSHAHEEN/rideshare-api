@@ -118,7 +118,7 @@ class ApiGapTests(unittest.IsolatedAsyncioTestCase):
         response = await self.get("/bookings/me", "passenger", ride_id=ride_id)
         self.assertEqual(self.ids(response), [current, old])  # newest first
         self.assertEqual(self.total(response), 2)
-        self.assertEqual(set(response.json()[0]), {"id", "ride_id", "passenger_id", "status", "ride"})
+        self.assertEqual(set(response.json()[0]), {"id", "ride_id", "passenger_id", "status", "seats_requested", "ride"})
         self.assertEqual(set(response.json()[0]["ride"]), RIDE_KEYS)
         live = await self.get("/bookings/me", "passenger", ride_id=ride_id, status="pending")
         self.assertEqual((self.ids(live), self.total(live)), ([current], 1))
@@ -126,6 +126,30 @@ class ApiGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.ids(unfiltered), self.total(unfiltered)), ([elsewhere, current, old], 3))
         page = await self.get("/bookings/me", "passenger", ride_id=ride_id, limit=1, offset=1)
         self.assertEqual((self.ids(page), self.total(page)), ([old], 2))
+
+    async def test_g2_g7_total_matches_lazy_expiry_status_filter(self):
+        """Merge of #17 with #20/#22: X-Total-Count must use the same status
+        filter as the page (lazy expiry reads Ride.departure_time), on both
+        list builders, and both builders carry seats_requested."""
+        ride_id = await self.ride()
+        async with AsyncSession(self.engine, expire_on_commit=False) as db:
+            due = Booking(ride_id=ride_id, passenger_id=self.users["passenger"].id,
+                          status=B.pending, expires_at=NOW - timedelta(minutes=1),
+                          seats_requested=2)
+            db.add(due)
+            await db.commit()
+        mine = await self.booking(await self.ride(), status=B.pending)
+        theirs = await self.booking(ride_id, passenger="other_passenger", status=B.pending)
+        for path, actor, live in (("/bookings/me", "passenger", mine),
+                                  (f"/rides/{ride_id}/bookings", "driver", theirs)):
+            with self.subTest(path=path):
+                expired = await self.get(path, actor, status="expired")
+                self.assertEqual((self.ids(expired), self.total(expired)), ([due.id], 1))
+                self.assertEqual(expired.json()[0]["status"], "expired")
+                self.assertEqual(expired.json()[0]["seats_requested"], 2)
+                pending = await self.get(path, actor, status="pending")
+                self.assertEqual((self.ids(pending), self.total(pending)), ([live], 1))
+                self.assertEqual(pending.json()[0]["seats_requested"], 1)
 
     async def test_g2_ride_filter_never_reveals_other_passengers_bookings(self):
         ride_id = await self.ride()
