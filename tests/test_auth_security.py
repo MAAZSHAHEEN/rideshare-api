@@ -7,7 +7,7 @@ import secrets
 import unittest
 from unittest.mock import patch
 
-from jose import jwt
+import jwt
 
 
 with patch.dict(os.environ, {
@@ -23,7 +23,8 @@ class AuthSecurityTests(unittest.TestCase):
     def test_issued_claims_and_configured_duration(self):
         token = auth.create_access_token(42, "driver")
         claims = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
-        self.assertEqual(set(claims), {"sub", "role", "iat", "exp"})
+        self.assertEqual(set(claims), {"sub", "role", "tv", "iat", "exp"})
+        self.assertIs(type(claims["tv"]), int)
         self.assertEqual(claims["sub"], "42")
         self.assertEqual(claims["role"], "driver")
         self.assertIs(type(claims["iat"]), int)
