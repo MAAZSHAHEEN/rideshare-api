@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import idempotency
 from database import get_db
 from models import BookingStatus, User
 from routers.dependencies import get_current_user
@@ -39,8 +40,18 @@ async def book_ride(
     ride_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    idempotency_key: str | None = Depends(idempotency.key_header),
 ):
-    return await booking_service.book_ride(ride_id=ride_id, db=db, current_user=current_user)
+    if idempotency_key is None:
+        return await booking_service.book_ride(ride_id=ride_id, db=db, current_user=current_user)
+    claim = await idempotency.claim(db, current_user.id, idempotency_key,
+                                    "booking.create", {"ride_id": ride_id})
+    if claim.replay is not None:
+        return claim.replay
+    return await booking_service.book_ride(
+        ride_id=ride_id, db=db, current_user=current_user,
+        before_commit=claim.recorder(201, BookingResponse),
+    )
 
 
 @router.patch("/{booking_id}/respond", response_model=BookingResponse)
@@ -49,5 +60,16 @@ async def respond_to_booking(
     accept: bool,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    idempotency_key: str | None = Depends(idempotency.key_header),
 ):
-    return await booking_service.respond_to_booking(booking_id=booking_id, accept=accept, db=db, current_user=current_user)
+    if idempotency_key is None:
+        return await booking_service.respond_to_booking(
+            booking_id=booking_id, accept=accept, db=db, current_user=current_user)
+    claim = await idempotency.claim(db, current_user.id, idempotency_key, "booking.respond",
+                                    {"booking_id": booking_id, "accept": accept})
+    if claim.replay is not None:
+        return claim.replay
+    return await booking_service.respond_to_booking(
+        booking_id=booking_id, accept=accept, db=db, current_user=current_user,
+        before_commit=claim.recorder(200, BookingResponse),
+    )

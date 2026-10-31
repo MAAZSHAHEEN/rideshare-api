@@ -32,6 +32,11 @@ with patch.dict(os.environ, {
     from models import Base
 
 
+HEAD = "c1a7e0b00001"
+# Milestone C objects absent before HEAD's chain (stripped for older revisions).
+MILESTONE_C_TABLES = ("idempotency_keys",)
+
+
 @unittest.skipUnless(TEST_DATABASE_URL, "Set TEST_DATABASE_URL to a PostgreSQL test database")
 class MigrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -102,7 +107,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as connection:
             return await connection.run_sync(inspect_schema)
 
-    async def assert_metadata_matches(self, metadata=None, revision_id="d924a6e38f10"):
+    async def assert_metadata_matches(self, metadata=None, revision_id=HEAD):
         metadata = metadata if metadata is not None else Base.metadata
 
         def compare(connection):
@@ -154,11 +159,41 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["sequences"], {"users_id_seq", "rides_id_seq", "bookings_id_seq"})
         return state
 
-    def task7_metadata(self):
+    FK_INDEXES = {
+        "rides": {"ix_rides_driver_id_departure_time_id": ["driver_id", "departure_time", "id"]},
+        "bookings": {"ix_bookings_passenger_id_id": ["passenger_id", "id"],
+                     "ix_bookings_ride_id_id": ["ride_id", "id"]},
+    }
+
+    def f6b2_metadata(self):
+        """Schema at f6b2d8e0c413, before any Milestone C revision."""
         metadata = MetaData()
         for table in Base.metadata.sorted_tables:
+            if table.name not in MILESTONE_C_TABLES:
+                table.to_metadata(metadata)
+        return metadata
+
+    def task9_metadata(self):
+        """Schema at e3a7c41b9f52, before the AST-005 lower(email) index."""
+        metadata = MetaData()
+        for table in self.f6b2_metadata().sorted_tables:
             historical_table = table.to_metadata(metadata)
-            Index(f"ix_{table.name}_id", historical_table.c.id)
+            historical_table.indexes = {index for index in historical_table.indexes
+                                        if index.name != "uq_users_email_lower"}
+        return metadata
+
+    def task8_metadata(self):
+        """Schema at d924a6e38f10, before the AST-003 FK listing indexes."""
+        metadata = self.task9_metadata()
+        for table in metadata.sorted_tables:
+            added = self.FK_INDEXES.get(table.name, {})
+            table.indexes = {index for index in table.indexes if index.name not in added}
+        return metadata
+
+    def task7_metadata(self):
+        metadata = self.task8_metadata()
+        for table in metadata.sorted_tables:
+            Index(f"ix_{table.name}_id", table.c.id)
         return metadata
 
     def task5_metadata(self):
@@ -329,8 +364,8 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
 
         original = await inspect_constraints_and_indexes()
         for attempt in range(2):
-            await self.run_python("-m", "alembic", "upgrade", "head")
-            await self.assert_metadata_matches()
+            await self.run_python("-m", "alembic", "upgrade", "d924a6e38f10")
+            await self.assert_metadata_matches(self.task8_metadata(), "d924a6e38f10")
             current = await inspect_constraints_and_indexes()
             for table, before in original.items():
                 with self.subTest(attempt=attempt, table=table):
@@ -348,6 +383,113 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.run_python("-m", "alembic", "downgrade", "-1")
                 await self.assert_metadata_matches(self.task7_metadata(), "b83d12f7a906")
                 self.assertEqual(await inspect_constraints_and_indexes(), original)
+
+    async def test_fk_listing_indexes_upgrade_downgrade_reupgrade(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        await self.assert_metadata_matches(self.task8_metadata(), "d924a6e38f10")
+
+        async def fk_indexes():
+            def read(connection):
+                inspector = inspect(connection)
+                return {table: {item["name"]: (item["column_names"], item["unique"])
+                                for item in inspector.get_indexes(table)
+                                if item["name"] in expected}
+                        for table, expected in self.FK_INDEXES.items()}
+            async with self.engine.connect() as connection:
+                return await connection.run_sync(read)
+
+        async def invalid_indexes():
+            async with self.engine.connect() as connection:
+                return await connection.scalar(text(
+                    "SELECT count(*) FROM pg_index WHERE NOT indisvalid"))
+
+        self.assertEqual(await fk_indexes(), {"rides": {}, "bookings": {}})
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "e3a7c41b9f52")
+            await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
+            self.assertEqual(await fk_indexes(), {
+                table: {name: (columns, False) for name, columns in expected.items()}
+                for table, expected in self.FK_INDEXES.items()
+            })
+            self.assertEqual(await invalid_indexes(), 0)
+            async with self.engine.connect() as connection:
+                self.assertEqual(await connection.scalar(text("SELECT count(*) FROM rides")), 1)
+            if attempt == 0:
+                await self.run_python("-m", "alembic", "downgrade", "-1")
+                await self.assert_metadata_matches(self.task8_metadata(), "d924a6e38f10")
+                self.assertEqual(await fk_indexes(), {"rides": {}, "bookings": {}})
+
+    async def test_fk_index_upgrade_reruns_and_repairs_interrupted_builds(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        # Simulate an interrupted run: one index finished, one left INVALID by
+        # a failed CREATE INDEX CONCURRENTLY, one never started.
+        await self.execute_sql(
+            "CREATE INDEX ix_bookings_passenger_id_id ON bookings (passenger_id, id)")
+        await self.execute_sql(
+            "CREATE INDEX ix_rides_driver_id_departure_time_id ON rides (driver_id, departure_time, id)")
+        await self.execute_sql("""
+            UPDATE pg_index SET indisvalid = false
+            WHERE indexrelid = 'ix_rides_driver_id_departure_time_id'::regclass
+        """)
+        await self.run_python("-m", "alembic", "upgrade", "e3a7c41b9f52")
+        await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
+        async with self.engine.connect() as connection:
+            rows = (await connection.execute(text("""
+                SELECT c.relname, i.indisvalid FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indexrelid
+                WHERE c.relname IN ('ix_rides_driver_id_departure_time_id',
+                                    'ix_bookings_passenger_id_id', 'ix_bookings_ride_id_id')
+                ORDER BY c.relname
+            """))).all()
+        self.assertEqual(rows, [("ix_bookings_passenger_id_id", True),
+                                ("ix_bookings_ride_id_id", True),
+                                ("ix_rides_driver_id_departure_time_id", True)])
+
+    async def test_case_insensitive_email_index_preflight_upgrade_downgrade(self):
+        await self.prepare_integrity_data("e3a7c41b9f52")
+        await self.execute_sql("""
+            INSERT INTO users (id, name, email, password, cnic, phone_number, role)
+            VALUES (3, 'Legacy', 'Driver@Example.com', 'test-hash', '3', '3', 'passenger')
+        """)
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("CaseDuplicateEmails", output)
+        self.assertIn("Affected user IDs: [[1, 3]]", output)
+        self.assertNotIn("example.com", output.lower())
+        await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
+        async with self.engine.connect() as connection:
+            self.assertEqual(await connection.scalar(text("SELECT count(*) FROM users")), 3)
+
+        # A mixed-case legacy row without a case twin is kept as stored.
+        await self.execute_sql("UPDATE users SET email = 'Legacy@Example.com' WHERE id = 3")
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "f6b2d8e0c413")
+            await self.assert_metadata_matches(self.f6b2_metadata(), "f6b2d8e0c413")
+            async with self.engine.connect() as connection:
+                self.assertEqual(await connection.scalar(
+                    text("SELECT email FROM users WHERE id = 3")), "Legacy@Example.com")
+            await self.assert_sql_rejected("""
+                INSERT INTO users (id, name, email, password, cnic, phone_number, role)
+                VALUES (4, 'Twin', 'LEGACY@example.COM', 'h', '4', '4', 'passenger')
+            """, "23505", "uq_users_email_lower")
+            if attempt == 0:
+                await self.run_python("-m", "alembic", "downgrade", "e3a7c41b9f52")
+                await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
+
+    async def test_full_upgrade_stopped_by_email_preflight_keeps_index_revision(self):
+        # Production path: d924a6e38f10 -> head in one command. When the AST-005
+        # preflight aborts, AST-003's committed concurrent indexes and its version
+        # stamp must stay together so the retry after cleanup succeeds.
+        await self.prepare_integrity_data("d924a6e38f10")
+        await self.execute_sql("""
+            INSERT INTO users (id, name, email, password, cnic, phone_number, role)
+            VALUES (3, 'Legacy', 'Driver@Example.com', 'test-hash', '3', '3', 'passenger')
+        """)
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("CaseDuplicateEmails", output)
+        await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
+        await self.execute_sql("UPDATE users SET email = 'legacy@example.com' WHERE id = 3")
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        await self.assert_metadata_matches()
 
     async def test_invalid_existing_data_aborts_migration_without_rewriting_rows(self):
         await self.prepare_integrity_data("50872040220b")
@@ -418,6 +560,101 @@ with patch.object(MetaData, 'create_all', side_effect=AssertionError('startup ca
             await self.run_python("-m", "alembic", "upgrade", "head")
             self.assertEqual(await self.assert_metadata_matches(), first_schema)
 
+
+    # --- Milestone C: c1a7e0b00001 idempotency keys ----------------------------
+
+    async def seed_legacy_bookings(self):
+        """Legacy rows in every booking status, as production may hold them."""
+        await self.execute_sql("""
+            INSERT INTO users (id, name, email, password, cnic, phone_number, role)
+            VALUES (3, 'Passenger 3', 'p3@example.com', 'test-hash', '3', '3', 'passenger'),
+                   (4, 'Passenger 4', 'p4@example.com', 'test-hash', '4', '4', 'passenger')
+        """)
+        await self.execute_sql("""
+            INSERT INTO bookings (ride_id, passenger_id, status)
+            VALUES (1, 2, 'pending'), (1, 3, 'accepted'), (1, 4, 'rejected'), (1, 4, 'cancelled')
+        """)
+
+    async def table_rows(self):
+        async with self.engine.connect() as connection:
+            return {table: (await connection.execute(text(f"SELECT * FROM {table} ORDER BY id"))).all()
+                    for table in ("users", "rides", "bookings")}
+
+    async def test_idempotency_table_upgrade_downgrade_reupgrade_keeps_legacy_rows(self):
+        await self.prepare_integrity_data("f6b2d8e0c413")
+        await self.seed_legacy_bookings()
+        before = await self.table_rows()
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "c1a7e0b00001")
+            await self.assert_metadata_matches(revision_id="c1a7e0b00001")
+            self.assertEqual(await self.table_rows(), before)
+            await self.execute_sql("""
+                INSERT INTO idempotency_keys (user_id, key, operation, request_hash,
+                    status_code, response_body, created_at, expires_at)
+                VALUES (2, 'k', 'booking.create', repeat('a', 64), 201, '{"id": 1}', now(), now())
+            """)
+            await self.assert_sql_rejected("""
+                INSERT INTO idempotency_keys (user_id, key, operation, request_hash, created_at, expires_at)
+                VALUES (2, 'k', 'booking.create', repeat('b', 64), now(), now())
+            """, "23505", "pk_idempotency_keys")
+            await self.assert_sql_rejected("""
+                INSERT INTO idempotency_keys (user_id, key, operation, request_hash, created_at, expires_at)
+                VALUES (2, '', 'booking.create', repeat('b', 64), now(), now())
+            """, "23514", "ck_idempotency_keys_key_length")
+            await self.assert_sql_rejected("""
+                INSERT INTO idempotency_keys (user_id, key, operation, request_hash, created_at, expires_at)
+                VALUES (999, 'k', 'booking.create', repeat('b', 64), now(), now())
+            """, "23503")
+            await self.run_python("-m", "alembic", "downgrade", "f6b2d8e0c413")
+            await self.assert_metadata_matches(self.f6b2_metadata(), "f6b2d8e0c413")
+            self.assertEqual(await self.table_rows(), before)
+
+    async def test_full_chain_from_production_head_downgrade_to_f6b2_and_reupgrade(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        await self.seed_legacy_bookings()
+        before = await self.table_rows()
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        head_schema = await self.assert_metadata_matches()
+        self.assertEqual(await self.table_rows(), before)
+        await self.run_python("-m", "alembic", "downgrade", "f6b2d8e0c413")
+        await self.assert_metadata_matches(self.f6b2_metadata(), "f6b2d8e0c413")
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        self.assertEqual(await self.assert_metadata_matches(), head_schema)
+        self.assertEqual(await self.table_rows(), before)
+        async with self.engine.connect() as connection:
+            self.assertEqual(await connection.scalar(text("SELECT count(*) FROM pg_index WHERE NOT indisvalid")), 0)
+
+    async def test_multi_revision_upgrade_failing_in_idempotency_revision_keeps_earlier_stamps(self):
+        await self.prepare_integrity_data("d924a6e38f10")
+        # A stray object blocks c1a7e0b00001 after e3a7 and f6b2 already ran.
+        await self.execute_sql("CREATE TABLE idempotency_keys (stray integer)")
+        output = await self.run_python("-m", "alembic", "upgrade", "head", expect_failure=True)
+        self.assertIn("idempotency_keys", output)
+        async with self.engine.connect() as connection:
+            self.assertEqual(await connection.scalar(text("SELECT version_num FROM alembic_version")),
+                             "f6b2d8e0c413")
+            self.assertEqual(await connection.scalar(text(
+                "SELECT count(*) FROM pg_indexes WHERE indexname IN ('uq_users_email_lower', "
+                "'ix_rides_driver_id_departure_time_id', 'ix_bookings_passenger_id_id', "
+                "'ix_bookings_ride_id_id')")), 4)
+        await self.execute_sql("DROP TABLE idempotency_keys")
+        await self.run_python("-m", "alembic", "upgrade", "head")
+        await self.assert_metadata_matches()
+
+    async def test_purge_job_cli_against_migrated_database(self):
+        await self.prepare_integrity_data("head")
+        await self.execute_sql("""
+            INSERT INTO idempotency_keys (user_id, key, operation, request_hash, status_code,
+                response_body, created_at, expires_at)
+            VALUES (2, 'old', 'booking.create', repeat('a', 64), 201, '{}', now() - interval '2 days',
+                    now() - interval '1 day'),
+                   (2, 'live', 'booking.create', repeat('a', 64), 201, '{}', now(), now() + interval '1 day')
+        """)
+        for expected in ("purged_idempotency_keys=1", "purged_idempotency_keys=0"):
+            output = await self.run_python("-m", "jobs.purge_idempotency_keys")
+            self.assertIn(expected, output)
+        async with self.engine.connect() as connection:
+            self.assertEqual((await connection.execute(text("SELECT key FROM idempotency_keys"))).scalars().all(), ["live"])
 
 if __name__ == "__main__":
     unittest.main()
