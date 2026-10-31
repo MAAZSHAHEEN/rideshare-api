@@ -1,7 +1,7 @@
 """Account status and token version for suspension (Milestone D, M5-A).
 
 Revision ID: d5e1a0b00001
-Revises: f6b2d8e0c413
+Revises: c1a7e0b00003
 
 Adds users.account_status VARCHAR(16) NOT NULL DEFAULT 'active' and
 users.token_version INTEGER NOT NULL DEFAULT 0.
@@ -20,9 +20,9 @@ Legacy safety and locking (PostgreSQL >= 11; CI and local run 17):
 - lock_timeout is bounded so a long-running transaction on users makes the
   migration fail fast instead of queueing every login behind it.
 
-The lead re-chains down_revision after the C-series revisions
-(c1a7e0b00001..3) before integration; this file deliberately points at
-f6b2d8e0c413 until then.
+Chain (SPRINT_PLAN): f6b2d8e0c413 -> c1a7e0b00001 -> c1a7e0b00002 ->
+c1a7e0b00003 -> d5e1a0b00001 -> d5e1a0b00002. Re-chained from f6b2d8e0c413
+onto c1a7e0b00003 on 31 Oct 2026; the operations are unchanged.
 
 Downgrade drops both columns (and their constraints). Suspension state and
 token versions are lost; a suspended user becomes active again, which is why
@@ -34,7 +34,7 @@ import sqlalchemy as sa
 
 
 revision = "d5e1a0b00001"
-down_revision = "f6b2d8e0c413"
+down_revision = "c1a7e0b00003"
 branch_labels = None
 depends_on = None
 

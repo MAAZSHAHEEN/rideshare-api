@@ -47,7 +47,7 @@ class AuditWriteTests(AuditTestBase):
         self.assertEqual(suspend.details, {
             "previous_status": "active", "new_status": "suspended", "token_version": 1,
             "cancelled_ride_ids": [ride], "cancelled_booking_ids": [booking],
-            "departed_active_ride_ids": [],
+            "expired_booking_ids": [], "departed_active_ride_ids": [],
         })
         self.assertEqual(reinstate.reason, "Appeal accepted")  # stored trimmed
         self.assertEqual(reinstate.details, {"previous_status": "suspended",

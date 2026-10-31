@@ -97,6 +97,8 @@ class SuspensionResponse(BaseModel):
     user: AdminUserResponse
     cancelled_ride_ids: list[int]
     cancelled_booking_ids: list[int]
+    # Pending requests already past their expiry: recorded as 'expired', not cancelled.
+    expired_booking_ids: list[int]
     # Departed but not completed/cancelled: left untouched for manual follow-up.
     departed_active_ride_ids: list[int]
 
@@ -138,6 +140,7 @@ async def suspend_user(
                 "token_version": user.token_version,
                 "cancelled_ride_ids": effects.cancelled_ride_ids,
                 "cancelled_booking_ids": effects.cancelled_booking_ids,
+                "expired_booking_ids": effects.expired_booking_ids,
                 "departed_active_ride_ids": effects.departed_active_ride_ids,
             },
         )
@@ -145,6 +148,7 @@ async def suspend_user(
             user=AdminUserResponse.from_user(user),
             cancelled_ride_ids=effects.cancelled_ride_ids,
             cancelled_booking_ids=effects.cancelled_booking_ids,
+            expired_booking_ids=effects.expired_booking_ids,
             departed_active_ride_ids=effects.departed_active_ride_ids,
         )
         await db.commit()

@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, CheckConstraint, Column, DDL, Index, Integer, String, DateTime, Enum as SAEnum, ForeignKey, event, func, text
+from sqlalchemy import BigInteger, CheckConstraint, Column, DDL, Index, Integer, PrimaryKeyConstraint, SmallInteger, String, DateTime, Enum as SAEnum, ForeignKey, event, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
@@ -80,6 +80,8 @@ class BookingStatus(str, enum.Enum):
     accepted  = "accepted"
     rejected  = "rejected"
     cancelled = "cancelled"
+    # Added by c1a7e0b00002. Terminal: a pending request past its expiry.
+    expired   = "expired"
 
 
 class Booking(Base):
@@ -93,6 +95,12 @@ class Booking(Base):
         # created by e3a7c41b9f52.
         Index('ix_bookings_passenger_id_id', 'passenger_id', 'id'),
         Index('ix_bookings_ride_id_id', 'ride_id', 'id'),
+        # Expiry sweep; created CONCURRENTLY by c1a7e0b00002.
+        Index('ix_bookings_pending_expires_at', 'expires_at',
+              postgresql_where=text("status = 'pending'")),
+        # Multi-seat bookings; created by c1a7e0b00003 (NOT VALID, then VALIDATE).
+        CheckConstraint('seats_requested >= 1 AND seats_requested <= 8',
+                        name='ck_bookings_seats_requested_range'),
     )
 
     id         = Column(Integer, primary_key=True)
@@ -100,6 +108,36 @@ class Booking(Base):
     passenger_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     status     = Column(SAEnum(BookingStatus), nullable=False, default=BookingStatus.pending)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # c1a7e0b00002. NULL = legacy request: expires at the ride's departure.
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    # c1a7e0b00003. Seats this request asks for and, once accepted, holds.
+    # Legacy rows read 1 through the constant (fast) server default.
+    seats_requested = Column(Integer, nullable=False, default=1, server_default=text("1"))
+
+
+class IdempotencyKey(Base):
+    """Stored outcome of a write sent with an Idempotency-Key header.
+
+    Created by c1a7e0b00001. One row per (user, key); see idempotency.py and
+    docs/architecture/BOOKING_SCHEMA_CHANGES.md. ``status_code`` and
+    ``response_body`` are only NULL inside the claiming transaction: the
+    response is written before that transaction commits.
+    """
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        PrimaryKeyConstraint('user_id', 'key', name='pk_idempotency_keys'),
+        CheckConstraint("char_length(key::text) >= 1", name='ck_idempotency_keys_key_length'),
+        Index('ix_idempotency_keys_expires_at', 'expires_at'),
+    )
+
+    user_id       = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    key           = Column(String(64), nullable=False)
+    operation     = Column(String(32), nullable=False)
+    request_hash  = Column(String(64), nullable=False)
+    status_code   = Column(SmallInteger, nullable=True)
+    response_body = Column(JSONB, nullable=True)
+    created_at    = Column(DateTime(timezone=True), nullable=False)
+    expires_at    = Column(DateTime(timezone=True), nullable=False)
 
 
 # Append-only enforcement for admin_audit_log. Migration d5e1a0b00002 creates
