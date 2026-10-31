@@ -11,6 +11,7 @@ NAME_MAX_LENGTH = 100
 PLACE_MAX_LENGTH = 100
 CNIC_INPUT_MAX_LENGTH = 32
 PHONE_INPUT_MAX_LENGTH = 32
+RIDE_SEATS_MIN = 1
 RIDE_SEATS_MAX = 8
 FARE_PER_SEAT_MAX = 100_000  # PKR; far above any intercity seat fare, well inside int4.
 
@@ -115,8 +116,10 @@ class RideCreate(BaseModel):
     origin:          str = Field(max_length=PLACE_MAX_LENGTH)
     destination:     str = Field(max_length=PLACE_MAX_LENGTH)
     departure_time:  AwareDatetime
-    # Zero stays valid (existing contract and DB CHECK >= 0); only upper bounds are new.
-    available_seats: int = Field(ge=0, le=RIDE_SEATS_MAX)
+    # Product decision (Maaz, 31 Oct): a NEW ride must offer at least one seat.
+    # Input validation only: the DB CHECK stays >= 0, existing rows with 0 seats
+    # are untouched, and seats still reach 0 as bookings are accepted.
+    available_seats: int = Field(ge=RIDE_SEATS_MIN, le=RIDE_SEATS_MAX)
     fare_per_seat:   int = Field(ge=0, le=FARE_PER_SEAT_MAX)
 
     _validate_places = field_validator("origin", "destination")(clean_text)

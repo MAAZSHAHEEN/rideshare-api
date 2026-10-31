@@ -481,16 +481,19 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any(error["loc"] == ["body", field]
                                     for error in response.json()["detail"]))
 
-    async def test_zero_ride_seats_and_fare_remain_valid(self):
+    async def test_new_ride_needs_a_seat_but_zero_fare_stays_valid(self):
+        # Product decision 31 Oct: minimum 1 seat for NEW rides; free rides remain allowed.
         token = create_access_token(self.driver.id, self.driver.role)
-        response = await self.client.post(
-            "/rides/", json={
-                "origin": "Peshawar", "destination": "Islamabad",
-                "departure_time": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
-                "available_seats": 0, "fare_per_seat": 0,
-            }, headers={"Authorization": f"Bearer {token}"},
-        )
-        self.assertEqual(response.status_code, 201, response.text)
+        for seats, expected in ((0, 422), (1, 201)):
+            with self.subTest(seats=seats):
+                response = await self.client.post(
+                    "/rides/", json={
+                        "origin": "Peshawar", "destination": "Islamabad",
+                        "departure_time": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                        "available_seats": seats, "fare_per_seat": 0,
+                    }, headers={"Authorization": f"Bearer {token}"},
+                )
+                self.assertEqual(response.status_code, expected, response.text)
 
     async def test_cancel_pending_keeps_seats(self):
         response = await self.cancel()

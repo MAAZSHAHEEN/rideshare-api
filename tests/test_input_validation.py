@@ -34,7 +34,7 @@ with patch.dict(os.environ, {
     from routers.dependencies import get_current_user
     from schemas import (
         CNIC_ERROR, FARE_PER_SEAT_MAX, NAME_MAX_LENGTH, PHONE_ERROR, PLACE_MAX_LENGTH,
-        RIDE_SEATS_MAX, SAME_PLACE_ERROR, RideCreate, UserCreate, clean_text, normalize_cnic,
+        RIDE_SEATS_MAX, RIDE_SEATS_MIN, SAME_PLACE_ERROR, RideCreate, UserCreate, clean_text, normalize_cnic,
         normalize_pk_mobile,
     )
 
@@ -134,7 +134,10 @@ class NormalisationTests(unittest.TestCase):
     def test_ride_bounds_and_places(self):
         self.assertEqual(RideCreate(**ride(available_seats=RIDE_SEATS_MAX,
                                            fare_per_seat=FARE_PER_SEAT_MAX)).available_seats, 8)
-        self.assertEqual(RideCreate(**ride(available_seats=0, fare_per_seat=0)).fare_per_seat, 0)
+        self.assertEqual(RideCreate(**ride(available_seats=RIDE_SEATS_MIN, fare_per_seat=0)).available_seats, 1)
+        for seats in (0, -1):
+            with self.subTest(seats=seats), self.assertRaises(ValidationError):
+                RideCreate(**ride(available_seats=seats))
         stripped = RideCreate(**ride(origin="  Lahore ", destination=" Rawalpindi"))
         self.assertEqual((stripped.origin, stripped.destination), ("Lahore", "Rawalpindi"))
         for bad in ({"available_seats": RIDE_SEATS_MAX + 1}, {"fare_per_seat": FARE_PER_SEAT_MAX + 1},
@@ -243,6 +246,7 @@ class SanitisedErrorTests(unittest.IsolatedAsyncioTestCase):
             ("origin", "o" * (PLACE_MAX_LENGTH + 1), "string_too_long",
              f"String should have at most {PLACE_MAX_LENGTH} characters"),
             ("destination", "   ", "value_error", "Value error, Value must not be blank"),
+            ("available_seats", 0, "greater_than_equal", "Input should be greater than or equal to 1"),
         ):
             with self.subTest(field=field):
                 response = await self.client.post("/rides/", json=ride(**{field: value}))
