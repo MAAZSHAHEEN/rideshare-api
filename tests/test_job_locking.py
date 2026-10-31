@@ -94,6 +94,7 @@ class JobLockTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as conn:
             return await conn.scalar(text(
                 "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
                 "AND classid::bigint = :ns AND granted"), {"ns": JOB_LOCK_NAMESPACE})
 
     async def test_lock_is_exclusive_and_released(self):
@@ -200,8 +201,9 @@ class JobLockTests(unittest.IsolatedAsyncioTestCase):
     async def test_cli_reports_skip_and_exits_zero(self):
         env = {**os.environ, "DATABASE_URL": TEST_DATABASE_URL,
                "SECRET_KEY": os.environ.get("SECRET_KEY") or "test-only-signing-key-0123456789abcdef"}
-        async with job_lock(self.engine, "expire_bookings"), \
-                job_lock(self.engine, "purge_idempotency_keys"):
+        async with job_lock(self.engine, "expire_bookings") as expire_held, \
+                job_lock(self.engine, "purge_idempotency_keys") as purge_held:
+            self.assertEqual((expire_held, purge_held), (True, True))
             for module in ("jobs.expire_bookings", "jobs.purge_idempotency_keys"):
                 result = await asyncio.to_thread(
                     subprocess.run, [sys.executable, "-B", "-m", module], cwd=ROOT, env=env,

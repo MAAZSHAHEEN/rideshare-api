@@ -175,9 +175,13 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live_per_ride, [])
 
     async def lock_holder_pids(self, job="expire_bookings"):
+        # Advisory locks are per database, but pg_locks lists every database on the
+        # server: without the database filter this saw (and the lock-loss test
+        # terminated) another suite's lock holder running on the same server (R-3).
         async with self.engine.connect() as conn:
             return list((await conn.scalars(text(
                 "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                "AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
                 "AND classid::bigint = :ns AND objid::bigint = :job"),
                 {"ns": JOB_LOCK_NAMESPACE, "job": JOB_LOCK_IDS[job]})).all())
 
@@ -316,6 +320,7 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         holders = await self.lock_holder_pids()
         workers = [pid for pid in await self.child_pids() if pid not in holders]
         self.assertEqual(len(holders), 1)
+        self.assertIn(holders[0], await self.child_pids())
         self.assertEqual(len(workers), 1)
         async with self.engine.connect() as conn:
             await conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": workers[0]})
@@ -344,6 +349,8 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_paused(child)
         holders = await self.lock_holder_pids()
         self.assertEqual(len(holders), 1)
+        # Only ever terminate this test's own child session (R-3).
+        self.assertIn(holders[0], await self.child_pids())
         async with self.engine.connect() as conn:
             await conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": holders[0]})
         # The lock is free as soon as its session ends, even though the job still runs.
