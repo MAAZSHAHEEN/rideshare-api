@@ -8,7 +8,8 @@ export interface RegisterInput extends LoginInput {
   name: string; cnic: string; phone_number: string; role: 'passenger' | 'driver';
 }
 export type RideStatus = 'active' | 'completed' | 'cancelled';
-export type BookingStatus = 'pending' | 'accepted' | 'rejected' | 'cancelled';
+/** 'expired' comes from PR #20 (pending expiry); older backends never send it, the UI tolerates both. */
+export type BookingStatus = 'pending' | 'accepted' | 'rejected' | 'cancelled' | 'expired';
 export interface Ride {
   id: number; driver_id: number; origin: string; destination: string;
   departure_time: string; available_seats: number; fare_per_seat: number; status: RideStatus;
@@ -16,3 +17,31 @@ export interface Ride {
 export interface PassengerBooking {
   id: number; ride_id: number; passenger_id: number; status: BookingStatus; ride: Ride;
 }
+
+/** GET /rides/ query. Place filters are trimmed, case-insensitive whole-value matches on the server (G3). */
+export interface RideSearch {
+  origin?: string; destination?: string;
+  /** ISO-8601 with offset; inclusive lower bound. */
+  departureFrom?: string;
+  /** ISO-8601 with offset; exclusive upper bound. */
+  departureBefore?: string;
+  minSeats?: number; limit?: number; offset?: number;
+}
+export interface Booking { id: number; ride_id: number; passenger_id: number; status: BookingStatus }
+
+/** POST /rides/ body. departure_time is ISO-8601 with an explicit offset (+05:00 from the driver UI). */
+export interface RideCreateInput {
+  origin: string; destination: string; departure_time: string; available_seats: number; fare_per_seat: number;
+}
+/** GET /rides/{id}/bookings item: the server projects only the passenger's id and name (no contact data). */
+export interface DriverBooking {
+  id: number; ride_id: number; passenger_id: number; status: BookingStatus; passenger: { id: number; name: string };
+}
+
+/** A list page: the rows plus X-Total-Count (G7), or null against a backend that doesn't send it. */
+export interface Page<T> { items: T[]; total: number | null }
+/** GET /rides/me `when` (D1). */
+export type RideWhen = 'upcoming' | 'departed';
+export type SortOrder = 'asc' | 'desc';
+/** GET /rides/me/booking-counts item (D2): request counts for one of the driver's own rides. */
+export interface RideBookingCounts { ride_id: number; pending: number; accepted: number; rejected: number; cancelled: number; /** Only once PR #20 is merged, if the endpoint adds it. */ expired?: number }

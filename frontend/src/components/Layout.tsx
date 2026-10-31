@@ -8,6 +8,13 @@ export function Brand() {
   return <Link className="brand" to="/" aria-label="RideShare home"><span className="brand-mark"><Icon name="road" size={25} /></span>Ride<span className="brand-blue">Share</span><span className="brand-dot">.</span></Link>;
 }
 
+/** Interim title for nested dashboard paths; each view sets its own title right after. */
+function areaTitle(pathname: string) {
+  if (pathname.startsWith('/passenger/')) return 'Passenger dashboard';
+  if (pathname.startsWith('/driver/')) return 'Driver dashboard';
+  return 'Page not found';
+}
+
 export function Layout() {
   const { user, logout, mode } = useAuth();
   const [menu, setMenu] = useState(false);
@@ -15,7 +22,7 @@ export function Layout() {
   useEffect(() => {
     setMenu(false);
     if (!location.hash) window.scrollTo(0, 0);
-    document.title = `${({ '/': 'A better way together', '/login': 'Log in', '/register': 'Create account', '/passenger': 'Passenger dashboard', '/driver': 'Driver dashboard', '/account': 'My account' } as Record<string, string>)[location.pathname] || 'Page not found'} | RideShare`;
+    document.title = `${({ '/': 'A better way together', '/login': 'Log in', '/register': 'Create account', '/passenger': 'Passenger dashboard', '/driver': 'Driver dashboard', '/account': 'My account' } as Record<string, string>)[location.pathname] || areaTitle(location.pathname)} | RideShare`;
     document.getElementById('main-content')?.focus({ preventScroll: true });
   }, [location.pathname, location.hash]);
   return <>

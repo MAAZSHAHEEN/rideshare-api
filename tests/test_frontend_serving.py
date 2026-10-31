@@ -15,7 +15,7 @@ with patch.dict(os.environ, {
     "SECRET_KEY": "frontend-serving-tests-only-signing-key",
 }):
     from main import app as backend
-from frontend_serving import CLIENT_PATHS, register_frontend
+from frontend_serving import CLIENT_AREAS, CLIENT_PATHS, register_frontend
 
 
 class FrontendServingTests(unittest.TestCase):
@@ -52,6 +52,42 @@ class FrontendServingTests(unittest.TestCase):
             head = self.client.head(path)
             self.assertEqual(head.status_code, 200)
             self.assertEqual(head.content, b"")
+
+    def test_client_area_deep_links_serve_html_on_reload(self):
+        # G1: nested passenger/driver routes must survive a reload or a shared link.
+        self.assertEqual(CLIENT_AREAS, ("/passenger", "/driver"))
+        for path in ("/passenger/rides/7", "/passenger/bookings", "/driver/rides", "/driver/rides/7",
+                     "/driver/rides/new", "/driver/", "/passenger/", "/driver/a/b/c"):
+            response = self.client.get(path + "?status=pending", headers={"Accept": "text/html"})
+            self.assertEqual(response.status_code, 200, path)
+            self.assertIn("text/html", response.headers["content-type"])
+            self.assertEqual(response.text, self.html)
+            self.assertEqual(response.headers["cache-control"], "no-cache")
+            self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+            head = self.client.head(path)
+            self.assertEqual(head.status_code, 200, path)
+            self.assertEqual(head.content, b"")
+
+    def test_client_area_deep_links_claim_no_api_or_lookalike_paths(self):
+        # Lookalike prefixes and API namespaces keep FastAPI's JSON 404.
+        for path in ("/drivers/1", "/driverx", "/passengers/rides/7", "/passenger-rides/7",
+                     "/bookings/x/y", "/account/settings", "/login/rides/7"):
+            response = self.client.get(path, headers={"Accept": "text/html"})
+            self.assertEqual(response.status_code, 404, path)
+            self.assertEqual(response.json(), {"detail": "Not Found"})
+        # Deep links are read-only: writes get a JSON 405, never HTML.
+        for method in ("POST", "PATCH", "DELETE"):
+            response = self.client.request(method, "/driver/rides/7")
+            self.assertEqual(response.status_code, 405, method)
+            self.assertIn("application/json", response.headers["content-type"])
+        # Real API routes under the same ids still answer as the API (auth first, JSON).
+        for path in ("/rides/new", "/rides/x"):
+            response = self.client.get(path, headers={"Accept": "text/html"})
+            self.assertIn(response.status_code, (401, 422), path)
+            self.assertIn("application/json", response.headers["content-type"])
+        self.assertEqual(self.client.get("/rides/7").status_code, 401)
+        self.assertEqual(self.client.get("/rides/7/bookings").status_code, 401)
+        self.assertNotIn("/driver/{rest}", self.client.get("/openapi.json").json()["paths"])
 
     def test_actual_api_routes_and_docs_remain_accessible(self):
         for path in ("/me", "/rides/", "/rides/me", "/rides/1", "/rides/1/bookings", "/bookings/me"):
@@ -109,5 +145,5 @@ class FrontendServingTests(unittest.TestCase):
         self.assertEqual(client.get("/me").status_code, 401)
         self.assertEqual(client.get("/docs").status_code, 200)
         self.assertEqual(client.get("/openapi.json").status_code, 200)
-        for path in (*CLIENT_PATHS, "/assets/missing.js", "/journey.svg", "/favicon.svg"):
+        for path in (*CLIENT_PATHS, "/driver/rides/7", "/passenger/rides/7", "/assets/missing.js", "/journey.svg", "/favicon.svg"):
             self.assertEqual(client.get(path).status_code, 404)

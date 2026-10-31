@@ -248,7 +248,9 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
                 for row in requests:
                     self.assertEqual(set(row["passenger"]), {"id", "name"})
                 await self.request_as("PATCH", f'/bookings/{third["id"]}/respond', host, 200, params={"accept": True})
-                completed = await self.request_as("PATCH", f'/rides/{ride["id"]}/complete', host, 200)
+                # AST-016: completion only after departure (the ride departs in a day).
+                with patch("clock.utc_now", return_value=datetime.now(timezone.utc) + timedelta(days=2)):
+                    completed = await self.request_as("PATCH", f'/rides/{ride["id"]}/complete', host, 200)
                 self.assertEqual((completed["status"], completed["available_seats"]), ("completed", 1))
                 # Alternating views uses the same account and keeps terminal history.
                 for _ in range(2):

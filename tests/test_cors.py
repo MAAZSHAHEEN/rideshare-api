@@ -35,6 +35,9 @@ async def check():
             response = await client.get('/me', headers={'Origin': origin})
             assert response.status_code == 401
             assert response.headers['access-control-allow-origin'] == origin
+            # G6/G7: browsers may read Retry-After (429) and X-Total-Count (lists).
+            exposed = {h.strip().lower() for h in response.headers['access-control-expose-headers'].split(',')}
+            assert exposed == {'retry-after', 'x-total-count'}, exposed
             assert response.headers['www-authenticate'] == 'Bearer'
         for origin, method, headers in (
             ('https://untrusted.example.com', 'GET', 'authorization'),
