@@ -12,11 +12,21 @@ from starlette.concurrency import run_in_threadpool
 
 from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
 from database import get_db
-from models import User, UserRole
+from models import AccountStatus, User, UserRole
 from schemas import PASSWORD_MAX_BYTES, Token, UserCreate, UserLogin, UserResponse
 from auth_rate_limit import check_login_identity
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+INVALID_LOGIN_DETAIL = "Invalid email or password"
+
+# Product decision D6 (open, docs/architecture/TRUST_AND_SAFETY.md §5.2): what a
+# suspended account sees after entering the CORRECT password. Default: the same
+# generic 401 as a wrong password, so login reveals nothing. To show the owner
+# "Account suspended" instead, change only this line to
+#     SUSPENDED_LOGIN_RESPONSE = (403, "Account suspended")
+# (safe against enumeration because the password is verified first).
+SUSPENDED_LOGIN_RESPONSE: tuple[int, str] = (401, INVALID_LOGIN_DETAIL)
 
 
 # --- Helpers ---
@@ -46,12 +56,17 @@ def verify_password(plain: str, hashed: str | None) -> bool:
         return False
 
 
-def create_access_token(user_id: int, role: str) -> str:
+def create_access_token(user_id: int, role: str, token_version: int = 0) -> str:
     if type(user_id) is not int or not 1 <= user_id <= 2**31 - 1:
         raise ValueError("Invalid user ID")
+    if type(token_version) is not int or not 0 <= token_version <= 2**31 - 1:
+        raise ValueError("Invalid token version")
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    payload = {"sub": str(user_id), "role": UserRole(role).value, "iat": now, "exp": expire}
+    payload = {
+        "sub": str(user_id), "role": UserRole(role).value, "tv": token_version,
+        "iat": now, "exp": expire,
+    }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -134,9 +149,19 @@ async def login(user_data: UserLogin, request: Request, db: AsyncSession = Depen
     )
     if not user or not valid_password:
         raise HTTPException(
-            status_code=401, detail="Invalid email or password",
+            status_code=401, detail=INVALID_LOGIN_DETAIL,
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # Checked only after the password, so the response timing and the answer
+    # for a wrong password are identical for active and suspended accounts.
+    if user.account_status != AccountStatus.active.value:
+        status_code, detail = SUSPENDED_LOGIN_RESPONSE
+        raise HTTPException(
+            status_code=status_code, detail=detail,
+            headers={"WWW-Authenticate": "Bearer"} if status_code == 401 else None,
+        )
 
-    token = create_access_token(user_id=user.id, role=user.role)
+    token = create_access_token(
+        user_id=user.id, role=user.role, token_version=user.token_version,
+    )
     return {"access_token": token, "token_type": "bearer"}

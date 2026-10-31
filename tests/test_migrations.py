@@ -102,7 +102,9 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as connection:
             return await connection.run_sync(inspect_schema)
 
-    async def assert_metadata_matches(self, metadata=None, revision_id="f6b2d8e0c413"):
+    HEAD_REVISION = "d5e1a0b00001"
+
+    async def assert_metadata_matches(self, metadata=None, revision_id=HEAD_REVISION):
         metadata = metadata if metadata is not None else Base.metadata
 
         def compare(connection):
@@ -118,7 +120,12 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                     [column.name for column in table.primary_key.columns],
                 )
                 # Autogenerate does not reliably compare CHECK expressions.
-                normalize = lambda expression: re.sub(r"[\s()]", "", str(expression))
+                # PostgreSQL deparses `x IN ('a','b')` as `x::text = ANY (ARRAY[...])`
+                # with casts; fold both spellings to one form.
+                def normalize(expression):
+                    folded = re.sub(r"[\s()]", "", str(expression))
+                    folded = re.sub(r"::[a-z]+(?:\[\])?", "", folded)
+                    return re.sub(r"=ANYARRAY\[(.*?)\]", r"IN\1", folded)
                 self.assertEqual(
                     {item["name"]: normalize(item["sqltext"])
                      for item in inspector.get_check_constraints(table.name)},
@@ -160,11 +167,27 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                      "ix_bookings_ride_id_id": ["ride_id", "id"]},
     }
 
-    def task9_metadata(self):
-        """Schema at e3a7c41b9f52, before the AST-005 lower(email) index."""
+    SUSPENSION_COLUMNS = ("account_status", "token_version")
+    SUSPENSION_CHECKS = ("ck_users_account_status", "ck_users_token_version_nonnegative")
+
+    def f6b2_metadata(self):
+        """Schema at f6b2d8e0c413, before Milestone D account status (d5e1a0b00001)."""
         metadata = MetaData()
         for table in Base.metadata.sorted_tables:
             historical_table = table.to_metadata(metadata)
+            if table.name == "users":
+                historical_table.constraints = {
+                    constraint for constraint in historical_table.constraints
+                    if constraint.name not in self.SUSPENSION_CHECKS
+                }
+                for name in self.SUSPENSION_COLUMNS:
+                    historical_table._columns.remove(historical_table.c[name])
+        return metadata
+
+    def task9_metadata(self):
+        """Schema at e3a7c41b9f52, before the AST-005 lower(email) index."""
+        metadata = self.f6b2_metadata()
+        for historical_table in metadata.sorted_tables:
             historical_table.indexes = {index for index in historical_table.indexes
                                         if index.name != "uq_users_email_lower"}
         return metadata
@@ -459,7 +482,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                 VALUES (4, 'Twin', 'LEGACY@example.COM', 'h', '4', '4', 'passenger')
             """, "23505", "uq_users_email_lower")
             if attempt == 0:
-                await self.run_python("-m", "alembic", "downgrade", "-1")
+                await self.run_python("-m", "alembic", "downgrade", "e3a7c41b9f52")
                 await self.assert_metadata_matches(self.task9_metadata(), "e3a7c41b9f52")
 
     async def test_full_upgrade_stopped_by_email_preflight_keeps_index_revision(self):
@@ -501,6 +524,58 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await connection.execute(text("SELECT * FROM bookings ORDER BY id"))).all(), before_bookings)
                 await self.execute_sql("DELETE FROM bookings")
                 await self.execute_sql("UPDATE rides SET available_seats = 2, fare_per_seat = 500, status = 'active'")
+
+    async def users_relfilenode(self):
+        async with self.engine.connect() as connection:
+            return await connection.scalar(text(
+                "SELECT relfilenode FROM pg_class WHERE oid = 'users'::regclass"))
+
+    async def test_account_status_upgrade_downgrade_reupgrade_with_legacy_rows(self):
+        # Legacy rows written at f6b2 (no status/version columns) must come
+        # through the upgrade as active/0, without a table rewrite.
+        await self.prepare_integrity_data("f6b2d8e0c413")
+        await self.assert_metadata_matches(self.f6b2_metadata(), "f6b2d8e0c413")
+        async with self.engine.connect() as connection:
+            before = (await connection.execute(text(
+                "SELECT id, name, email, password, cnic, phone_number, role FROM users ORDER BY id"))).all()
+        for attempt in range(2):
+            relfilenode = await self.users_relfilenode()
+            await self.run_python("-m", "alembic", "upgrade", "d5e1a0b00001")
+            await self.assert_metadata_matches()
+            # ADD COLUMN ... NOT NULL DEFAULT <constant> is catalog-only on PG >= 11.
+            self.assertEqual(await self.users_relfilenode(), relfilenode, "users was rewritten")
+            async with self.engine.connect() as connection:
+                self.assertEqual((await connection.execute(text(
+                    "SELECT id, name, email, password, cnic, phone_number, role FROM users "
+                    "WHERE id < 10 ORDER BY id"
+                ))).all(), before)
+                self.assertEqual((await connection.execute(text(
+                    "SELECT DISTINCT account_status, token_version FROM users"))).all(),
+                    [("active", 0)])  # including id 2, suspended before the downgrade
+            # Rows inserted by pre-Milestone-D code (no new columns named) get the defaults.
+            await self.execute_sql("""
+                INSERT INTO users (id, name, email, password, cnic, phone_number, role)
+                VALUES (10 + :n, 'Old code', 'old' || :n || '@example.com', 'h', 'c' || :n, 'p', 'passenger')
+            """, {"n": attempt})
+            async with self.engine.connect() as connection:
+                self.assertEqual((await connection.execute(text(
+                    "SELECT account_status, token_version FROM users WHERE id = 10 + :n"),
+                    {"n": attempt})).one(), ("active", 0))
+            await self.assert_sql_rejected(
+                "UPDATE users SET account_status = 'banned' WHERE id = 1", "23514", "ck_users_account_status")
+            await self.assert_sql_rejected(
+                "UPDATE users SET token_version = -1 WHERE id = 1", "23514",
+                "ck_users_token_version_nonnegative")
+            await self.assert_sql_rejected(
+                "UPDATE users SET account_status = NULL WHERE id = 1", "23502")
+            await self.execute_sql(
+                "UPDATE users SET account_status = 'suspended', token_version = 3 WHERE id = 2")
+            await self.run_python("-m", "alembic", "downgrade", "-1")
+            await self.assert_metadata_matches(self.f6b2_metadata(), "f6b2d8e0c413")
+            async with self.engine.connect() as connection:
+                self.assertEqual((await connection.execute(text(
+                    "SELECT id, name, email, password, cnic, phone_number, role FROM users "
+                    "WHERE id < 10 ORDER BY id"))).all(), before)
 
     async def test_empty_database_upgrade_downgrade_reupgrade_and_startup(self):
         empty = {"tables": set(), "enums": {}, "sequences": set()}

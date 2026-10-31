@@ -75,7 +75,9 @@ class JoseIssuedTokenCompatibilityTests(unittest.TestCase):
         token = auth.create_access_token(7, "passenger")
         self.assertEqual(jwt.get_unverified_header(token), {"alg": "HS256", "typ": "JWT"})
         claims = jwt.decode(token, options={"verify_signature": False})
-        self.assertEqual(list(claims), ["sub", "role", "iat", "exp"])
+        # Milestone D adds `tv` (token_version); golden tokens without it still verify.
+        self.assertEqual(list(claims), ["sub", "role", "tv", "iat", "exp"])
+        self.assertEqual(claims["tv"], 0)
         self.assertEqual(claims["exp"] - claims["iat"], auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
         self.assertEqual(dependencies.decode_access_token(token), (7, UserRole.passenger))
 

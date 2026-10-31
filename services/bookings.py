@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Booking, BookingStatus, Ride, RideStatus, User
 from permissions import allowed_modes
+from services.accounts import lock_active_account
 from schemas import DriverBookingResponse, PassengerBookingResponse, PassengerSummary, RideResponse
 
 
@@ -125,6 +126,11 @@ async def book_ride(
         # Passenger capability comes from the authenticated database account
         if "passenger" not in allowed_modes(current_user.role):
             raise HTTPException(status_code=403, detail="Only passengers can book rides")
+
+        # Lock order User -> Ride -> Booking: a concurrent suspension of this
+        # passenger either finishes first (we get 401) or waits for our commit
+        # and then cancels the booking we create.
+        await lock_active_account(db, current_user.id)
 
         # Lock the ride row for the duration of this transaction to prevent
         # concurrent requests from double-booking the last seat.

@@ -166,6 +166,24 @@ and restores the right seats; race: suspension vs booking accept (lock order,
 in the same transaction (rollback leaves no row); search hides a suspended
 driver's ride.
 
+### 5.4 As implemented (`feat/account-suspension`, revision `d5e1a0b00001`)
+
+Where the build differs from §5.1–5.3, the build is authoritative:
+
+| Topic | Implemented | Why it differs from the proposal |
+|---|---|---|
+| Column | `users.account_status VARCHAR(16) NOT NULL DEFAULT 'active'`, `CHECK (account_status IN ('active','suspended'))`; `users.token_version INTEGER NOT NULL DEFAULT 0`, `CHECK (token_version >= 0)` | `deactivated` and `status_changed_at` deferred until self-delete exists; adding a state is a CHECK swap. Named `account_status` (not `status`) so it never collides with ride/booking `status` in joins. |
+| Legacy rows | Catalog-only `ADD COLUMN … DEFAULT` (PG ≥ 11; asserted by an unchanged `relfilenode` in `test_migrations`); `lock_timeout = 5s` | — |
+| Tokens | JWT carries `tv`. A token without `tv` is read as `tv = 0` (every account's starting version) and keeps working until expiry **unless** the account has been suspended or reinstated since. `tv` must be a non-bool int in [0, 2³¹−1]. | No `TOKEN_VERSION_ENFORCED` flag: treating a missing `tv` as 0 is exactly as strict once a version bumps, so no env change (approval gate) is needed. |
+| Token for a suspended account / stale `tv` | Generic **401 `Invalid token`** | Assignment for this sprint: no account-state oracle for token holders (the proposal's 403 is dropped). |
+| Login, suspended + correct password | `routers/auth.SUSPENDED_LOGIN_RESPONSE`, default `(401, "Invalid email or password")`, identical to a wrong password. Switching to `(403, "Account suspended")` is a one-line change (**D6 still open**). Password is always verified first. | — |
+| Endpoints | `GET /admin/users/{id}` (masked email/CNIC/phone, no token_version), `POST /admin/users/{id}/suspend`, `POST …/reinstate`. Body `{"reason": str}`: 3–500 chars after trimming, no control characters, rejects any run of ≥ 7 digits (CNIC/phone guard). 409 on suspend-suspended / reinstate-active; 404 unknown id; 403 self-action. | `reason_code` enum deferred until the audit log has seen real use; free text is bounded and digit-filtered instead. |
+| Admin on admin | Allowed (another admin can suspend a compromised admin); self-action is 403. | Decision D1/D8 may restrict it. |
+| Future rides (D5) | **Auto-cancel** (recommended option): the user's own active rides with `departure_time > now()` → `cancelled`, their pending/accepted bookings → `cancelled`, `available_seats` += accepted count (same arithmetic as `cancel_ride`). The user's own live bookings on other drivers' future rides → `cancelled`, seat returned if accepted. Departed-but-active rides are untouched and returned as `departed_active_ride_ids`. Reinstatement restores nothing. | Implemented directly, not via M4 `lifecycle.apply_booking_transition` (not on this base); the lead should switch to it when M4 lands. |
+| Lock order | **User → Ride(s) id ASC → Booking(s) id ASC.** Suspend/reinstate take `FOR NO KEY UPDATE` on the target user; `book_ride` and `create_ride` take `FOR SHARE` on the caller's user row first (`services/accounts.lock_active_account`). `FOR NO KEY UPDATE` does not conflict with FK `FOR KEY SHARE`, so unrelated inserts never wait. | Without the user-row lock, a request authenticated a millisecond before the suspension could still create a ride/booking after it. |
+| Search filter | Not added. | Auto-cancel removes the suspended driver's future rides from discovery in the same transaction; departed rides are already excluded. Add the join only if a non-cancelling policy (freeze) is chosen. |
+| Overflow | `token_version` would overflow after 2³¹−1 status changes on one account (a 500, no security impact). | Not reachable in practice. |
+
 ## 6. Driver eligibility
 
 ### 6.1 State machine (`driver_profiles.status`)

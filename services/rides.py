@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Booking, BookingStatus, Ride, RideStatus, User
 from permissions import allowed_modes
+from services.accounts import lock_active_account
 from schemas import RideCreate
 
 
@@ -137,6 +138,10 @@ async def create_ride(
         # Driver capability does not depend on a frontend-selected mode
         if "driver" not in allowed_modes(current_user.role):
             raise HTTPException(status_code=403, detail="Only drivers can create rides")
+
+        # A concurrent suspension holds this row (User -> Ride -> Booking);
+        # waiting here means the new ride is either rejected or cancelled by it.
+        await lock_active_account(db, current_user.id)
 
         departure_time = ride_data.departure_time.astimezone(timezone.utc)
         if departure_time <= datetime.now(timezone.utc):

@@ -45,3 +45,20 @@ def mask_phone(value: str | None) -> str | None:
     if match is None:
         return PHONE_FULLY_MASKED
     return f"+92 3** *** **{match.group(1)[-2:]}"
+
+
+EMAIL_FULLY_MASKED = "***@***"
+
+
+def mask_email(value: str | None) -> str | None:
+    """``ayesha.khan@example.com`` -> ``a***@example.com``. Unrecognised -> fully masked.
+
+    The domain stays visible (support needs to tell providers apart); the
+    local part shows only its first character.
+    """
+    if value is None:
+        return None
+    local, at, domain = value.strip().rpartition("@")
+    if not at or not local or not domain or "@" in local or not local[0].isascii():
+        return EMAIL_FULLY_MASKED
+    return f"{local[0]}***@{domain}"

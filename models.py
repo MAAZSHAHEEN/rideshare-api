@@ -17,11 +17,22 @@ class RideStatus(str, enum.Enum):
     cancelled = "cancelled"
 
 
+class AccountStatus(str, enum.Enum):
+    active    = "active"
+    suspended = "suspended"
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
         # Case-insensitive email identity; created by f6b2d8e0c413 (AST-005).
         Index('uq_users_email_lower', func.lower(text('email')), unique=True),
+        # VARCHAR + CHECK, not a PostgreSQL enum: adding a state later is a
+        # constraint swap, not ALTER TYPE ... ADD VALUE. Created by d5e1a0b00001.
+        CheckConstraint(
+            "account_status IN ('active', 'suspended')", name='ck_users_account_status',
+        ),
+        CheckConstraint('token_version >= 0', name='ck_users_token_version_nonnegative'),
     )
 
     id           = Column(Integer, primary_key=True)
@@ -33,6 +44,14 @@ class User(Base):
     role         = Column(SAEnum(UserRole), nullable=False, default=UserRole.passenger)
     created_at   = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at   = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Milestone D (d5e1a0b00001). Server defaults fill legacy rows; every
+    # suspension and reinstatement increments token_version, which revokes all
+    # previously issued access tokens (their `tv` claim no longer matches).
+    account_status = Column(
+        String(16), nullable=False, default=AccountStatus.active.value,
+        server_default=text("'active'"),
+    )
+    token_version = Column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
 class Ride(Base):

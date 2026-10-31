@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
 
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import ALGORITHM, SECRET_KEY
 from database import get_db
-from models import User, UserRole
+from models import AccountStatus, User, UserRole
 
 security = HTTPBearer()
 
@@ -22,14 +23,22 @@ async def get_current_user(
         status_code=401, detail="Invalid token", headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        user_id, role = decode_access_token(credentials.credentials)
+        claims = decode_access_claims(credentials.credentials)
     except InvalidAccessToken:
         raise unauthorized from None
 
-    result = await db.execute(select(User).where(User.id == user_id))
+    result = await db.execute(select(User).where(User.id == claims.user_id))
     user = result.scalar_one_or_none()
 
-    if user is None or user.role != role:
+    # Suspension (Milestone D): a suspended account and any token issued before
+    # the latest suspend/reinstate (stale `tv`) get the same generic 401 as a
+    # bad token, so a token holder learns nothing about the account's state.
+    if (
+        user is None
+        or user.role != claims.role
+        or user.account_status != AccountStatus.active.value
+        or user.token_version != claims.token_version
+    ):
         raise unauthorized
 
     return user
@@ -39,11 +48,30 @@ class InvalidAccessToken(Exception):
     """Any reason a bearer token is unusable; callers map it to a generic 401."""
 
 
+@dataclass(frozen=True)
+class AccessClaims:
+    user_id: int
+    role: UserRole
+    token_version: int
+
+
+TOKEN_VERSION_MAX = 2**31 - 1
+
+
 def decode_access_token(token: str) -> tuple[int, UserRole]:
-    """Verify an HS* access token and return (user_id, role).
+    """Verify an HS* access token and return (user_id, role)."""
+    claims = decode_access_claims(token)
+    return claims.user_id, claims.role
+
+
+def decode_access_claims(token: str) -> AccessClaims:
+    """Verify an HS* access token and return its validated claims.
 
     Accepts tokens issued by python-jose (<= AST-008) and PyJWT alike: the
-    compact JWS format, header and claims are identical.
+    compact JWS format, header and claims are identical. Tokens issued before
+    Milestone D carry no `tv` claim and are read as token_version 0, which is
+    every account's starting version, so they keep working until expiry
+    unless the account has since been suspended or reinstated.
     """
     try:
         # The algorithm is pinned by configuration, never taken from the token.
@@ -70,9 +98,13 @@ def decode_access_token(token: str) -> tuple[int, UserRole]:
             raise ValueError("Invalid issued-at time")
         if "nbf" in payload and (type(payload["nbf"]) is not int or payload["nbf"] > now):
             raise ValueError("Invalid not-before time")
+        token_version = payload.get("tv", 0)
+        # type() rather than isinstance(): JSON true must not pass as 1.
+        if type(token_version) is not int or not 0 <= token_version <= TOKEN_VERSION_MAX:
+            raise ValueError("Invalid token version")
     except (jwt.PyJWTError, ValueError, TypeError, KeyError, OverflowError):
         raise InvalidAccessToken from None
-    return user_id, role
+    return AccessClaims(user_id=user_id, role=role, token_version=token_version)
 
 
 ADMIN_FORBIDDEN_DETAIL = "Admin access required"

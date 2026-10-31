@@ -72,7 +72,10 @@ class PhoneMaskingTests(unittest.TestCase):
 SENSITIVE_PROPERTY = re.compile(r"cnic|phone|password|national_id", re.IGNORECASE)
 # Response models allowed to carry a sensitive-looking property, mapped to the reason.
 # Any entry here must serve masked values (privacy.mask_*) to non-owners.
-MASKED_RESPONSE_ALLOWLIST: dict[str, str] = {}
+MASKED_RESPONSE_ALLOWLIST: dict[str, str] = {
+    "AdminUserResponse": "admin-only; cnic_masked/phone_masked are built by privacy.mask_* "
+                         "(asserted in tests/test_account_suspension.py)",
+}
 
 
 def _response_schema_names(spec):
