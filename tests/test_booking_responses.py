@@ -521,6 +521,8 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json(), {
             "id": self.booking_ids[0], "ride_id": self.ride_id,
             "passenger_id": self.passenger.id, "status": "cancelled",
+            # Additive field from c1a7e0b00003 (deliberate contract update).
+            "seats_requested": 1,
         })
         self.assertEqual(await self.state(), (2, [BookingStatus.cancelled, BookingStatus.pending]))
 

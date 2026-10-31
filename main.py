@@ -35,9 +35,13 @@ app.add_middleware(
     allow_origins=FRONTEND_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH"],
-    allow_headers=["Authorization", "Content-Type"],
-    # Retry-After for 429s (G6); X-Total-Count on list endpoints (G7).
-    expose_headers=["Retry-After", "X-Total-Count"],
+    # Idempotency-Key (#18) lets a cross-origin SPA send per-action keys; it is
+    # a bounded, non-credential header (opaque 1-64 visible-ASCII token, validated
+    # server-side in idempotency.py), so allowing it widens nothing else.
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+    # Retry-After for 429s (G6); X-Total-Count on list endpoints (G7);
+    # Idempotent-Replayed marks a replayed booking response (#18).
+    expose_headers=["Retry-After", "X-Total-Count", "Idempotent-Replayed"],
 )
 app.include_router(auth.router)
 app.include_router(rides.router)
