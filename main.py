@@ -15,6 +15,7 @@ from routers.dependencies import get_current_user
 from models import User
 from routers import rides
 from routers import bookings
+from routers import admin
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -35,12 +36,13 @@ app.add_middleware(
     allow_origins=FRONTEND_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH"],
-    allow_headers=["Authorization", "Content-Type"],
-    expose_headers=["Retry-After"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+    expose_headers=["Retry-After", "Idempotent-Replayed"],
 )
 app.include_router(auth.router)
 app.include_router(rides.router)
 app.include_router(bookings.router)
+app.include_router(admin.router)
 
 
 

@@ -97,6 +97,24 @@ Revision `b83d12f7a906` adds `ix_rides_status_departure_time_id` on
 Apply it with `alembic upgrade head`. This ordinary transactional index build
 can block writes while it runs; schedule it appropriately for populated databases.
 
+Revision `e3a7c41b9f52` (AST-003) adds foreign-key-led indexes for owner listings
+and booking locks: `ix_rides_driver_id_departure_time_id`,
+`ix_bookings_passenger_id_id` and `ix_bookings_ride_id_id`. They are built with
+`CREATE INDEX CONCURRENTLY` outside a transaction, so writes continue during the
+build. If a build is interrupted, run `alembic downgrade d924a6e38f10` (drops
+them with `IF EXISTS`) and upgrade again. Not yet applied to production.
+
+Email identity is case-insensitive (AST-005). Registration and login trim the
+email and lowercase its ASCII letters; lookups and uniqueness use PostgreSQL
+`lower(email)`, so accounts stored with mixed case before this change still log
+in. Non-ASCII letters are left to PostgreSQL's `lower()` because Python's Unicode
+case mapping can differ from it (for example `İ`). Accounts whose stored email
+has surrounding whitespace (possible only through direct SQL; the API always
+trimmed) cannot log in and need an operator fix by user ID. Revision `f6b2d8e0c413` adds the unique
+index `uq_users_email_lower`. Before creating it, the migration aborts without
+changes if any accounts differ only by case, printing the affected user IDs
+(never addresses) so an operator can resolve them. Not yet applied to production.
+
 `PATCH /rides/{ride_id}/cancel` lets only the owning driver transition an active
 ride to cancelled. It returns the existing ride JSON (200). Missing rides return
 404, completed/already-cancelled rides return 409, and non-owners or admins
@@ -126,6 +144,13 @@ serialize on the Ride lock, so exactly one terminal ride transition can win.
 - POST /bookings/{ride_id} — book a ride (passenger capability, ordinary accounts)
 - PATCH /bookings/{booking_id}/respond — accept or reject booking (driver capability, ordinary accounts)
 
+Departure rule: once a ride's `departure_time` is at or before the current UTC
+time, booking it and accepting a pending request both return 409
+(`Ride has already departed`). Rejecting a pending request stays allowed so
+drivers can clear stale requests. The check runs after the Ride row lock, so a
+request that waited on a concurrent transaction is judged at the time it
+proceeds. Time comes from `clock.utc_now()`.
+
 `PATCH /bookings/{booking_id}/cancel` lets only the owning passenger cancel a
 pending or accepted booking on an active ride. It returns the existing booking
 JSON with status `cancelled` (200). A pending cancellation does not change seats; an accepted
@@ -141,7 +166,13 @@ Passenger cancellation on completed/cancelled rides returns 409. In particular,
 accepted bookings on completed rides cannot be cancelled or restore seats. If
 passenger cancellation wins the Ride lock before completion, its cancellation
 and any valid seat restoration persist; completion may then also succeed.
-No departure-time cutoff is imposed by this endpoint.
+Cancellation cut-off: an *accepted* booking can no longer be cancelled once
+the ride's `departure_time` is at or before the current UTC time; the endpoint
+returns 409 (`Ride has already departed`) and the seat is not restored. A
+*pending* request can still be withdrawn after departure. The check runs after
+both row locks, using `clock.utc_now()`. Driver ride cancellation has no
+cut-off. All ride/booking transitions are defined in `lifecycle.py`; see
+`docs/architecture/BOOKING_LIFECYCLE.md` for the full state tables and races.
 
 API errors use FastAPI's existing `{"detail": ...}` response. Authentication
 failures return 401 with `WWW-Authenticate: Bearer`; login uses the same generic
