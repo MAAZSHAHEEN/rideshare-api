@@ -217,6 +217,9 @@ class BootstrapTests(CliTestBase):
                             "AND wait_event_type = 'Lock' AND wait_event = 'advisory'")):
                         blocked = True
                         break
+                    # pg_stat_activity's list of backends is snapshotted once per transaction:
+                    # end it, or a backend that connected after the first poll is never seen.
+                    await conn.rollback()
                     await asyncio.sleep(0.02)
             gate.set()
             codes = [await first, await second]
