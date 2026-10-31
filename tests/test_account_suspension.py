@@ -27,8 +27,10 @@ with patch.dict(os.environ, {
     import config
     from database import Base, get_db
     from main import app
-    from models import AccountStatus, Booking, BookingStatus, Ride, RideStatus, User, UserRole
+    from models import (AccountStatus, Booking, BookingStatus, IdempotencyKey, Ride, RideStatus,
+                        User, UserRole)
     from routers import auth as auth_routes
+    from routers import bookings as booking_routes
     from routers.admin import REASON_MAX_LENGTH
     from routers.auth import create_access_token, hash_password
     from routers.dependencies import ADMIN_FORBIDDEN_DETAIL, decode_access_claims, InvalidAccessToken
@@ -132,9 +134,11 @@ class SuspensionTestBase(unittest.IsolatedAsyncioTestCase):
             await db.commit()
             return ride.id
 
-    async def add_booking(self, ride_id, passenger="passenger", status=BookingStatus.pending):
+    async def add_booking(self, ride_id, passenger="passenger", status=BookingStatus.pending,
+                          seats=1, expires_at=None):
         async with self.session() as db:
-            booking = Booking(ride_id=ride_id, passenger_id=self.users[passenger].id, status=status)
+            booking = Booking(ride_id=ride_id, passenger_id=self.users[passenger].id, status=status,
+                              seats_requested=seats, expires_at=expires_at)
             db.add(booking)
             await db.commit()
             return booking.id
@@ -428,6 +432,76 @@ class SuspensionEffectTests(SuspensionTestBase):
         self.assertEqual(await self.booking_status(booking), BookingStatus.accepted)
 
 
+class MultiSeatSuspensionTests(SuspensionTestBase):
+    """c1a7e0b00003: suspension restores exactly the seats each accepted booking holds."""
+
+    async def test_suspended_driver_with_two_and_three_seat_bookings_gets_every_seat_back(self):
+        # Ride A: capacity 3, one 2-seat acceptance -> 1 left.
+        ride_a = await self.add_ride(seats=1)
+        a_two = await self.add_booking(ride_a, "passenger", BookingStatus.accepted, seats=2)
+        # Ride B: capacity 8, 3 + 2 accepted -> 3 left; a 4-seat request is pending (no debit).
+        ride_b = await self.add_ride(seats=3)
+        b_three = await self.add_booking(ride_b, "passenger", BookingStatus.accepted, seats=3)
+        b_two = await self.add_booking(ride_b, "other_passenger", BookingStatus.accepted, seats=2)
+        b_pending = await self.add_booking(ride_b, "admin", BookingStatus.pending, seats=4)
+        b_rejected = await self.add_booking(ride_b, "other_admin", BookingStatus.rejected, seats=3)
+
+        response = await self.suspend("driver")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["cancelled_ride_ids"], sorted([ride_a, ride_b]))
+        self.assertEqual(body["cancelled_booking_ids"], sorted([a_two, b_three, b_two, b_pending]))
+        self.assertEqual(body["expired_booking_ids"], [])
+        self.assertEqual(await self.ride_state(ride_a), (RideStatus.cancelled, 3))
+        self.assertEqual(await self.ride_state(ride_b), (RideStatus.cancelled, 8))
+        for booking in (a_two, b_three, b_two, b_pending):
+            self.assertEqual(await self.booking_status(booking), BookingStatus.cancelled)
+        self.assertEqual(await self.booking_status(b_rejected), BookingStatus.rejected)
+
+    async def test_suspended_driver_with_single_three_seat_booking_restores_three(self):
+        # Boundary: one booking holding every seat of a 3-seat ride.
+        ride = await self.add_ride(seats=0)
+        booking = await self.add_booking(ride, "passenger", BookingStatus.accepted, seats=3)
+        body = (await self.suspend("driver")).json()
+        self.assertEqual(body["cancelled_booking_ids"], [booking])
+        self.assertEqual(await self.ride_state(ride), (RideStatus.cancelled, 3))
+
+    async def test_suspended_passenger_three_seat_booking_on_another_ride_restores_three(self):
+        ride = await self.add_ride(driver="other_driver", seats=1)   # capacity 6
+        mine = await self.add_booking(ride, "passenger", BookingStatus.accepted, seats=3)
+        theirs = await self.add_booking(ride, "other_passenger", BookingStatus.accepted, seats=2)
+        body = (await self.suspend("passenger")).json()
+        self.assertEqual(body["cancelled_ride_ids"], [])
+        self.assertEqual(body["cancelled_booking_ids"], [mine])
+        self.assertEqual(await self.ride_state(ride), (RideStatus.active, 4))   # 1 + 3, not 1 + 1
+        self.assertEqual(await self.booking_status(theirs), BookingStatus.accepted)
+
+    async def test_due_pending_requests_are_expired_not_cancelled(self):
+        # c1a7e0b00002: a pending request past expires_at reads 'expired' even
+        # before the sweep. Suspension records it as such; no seat effect.
+        own_ride = await self.add_ride(seats=2)
+        due_on_own = await self.add_booking(own_ride, "passenger", BookingStatus.pending, seats=2,
+                                            expires_at=PAST(1))
+        live_on_own = await self.add_booking(own_ride, "other_passenger", BookingStatus.pending,
+                                             expires_at=FUTURE(1))
+        already_expired = await self.add_booking(own_ride, "admin", BookingStatus.expired,
+                                                 expires_at=PAST(3))
+        other = await self.add_ride(driver="other_driver", seats=1)
+        due_as_passenger = await self.add_booking(other, "driver", BookingStatus.pending,
+                                                  seats=3, expires_at=PAST(1))
+
+        body = (await self.suspend("driver")).json()
+        self.assertEqual(body["cancelled_ride_ids"], [own_ride])
+        self.assertEqual(body["cancelled_booking_ids"], [live_on_own])
+        self.assertEqual(body["expired_booking_ids"], sorted([due_on_own, due_as_passenger]))
+        self.assertEqual(await self.booking_status(due_on_own), BookingStatus.expired)
+        self.assertEqual(await self.booking_status(due_as_passenger), BookingStatus.expired)
+        self.assertEqual(await self.booking_status(live_on_own), BookingStatus.cancelled)
+        self.assertEqual(await self.booking_status(already_expired), BookingStatus.expired)
+        self.assertEqual(await self.ride_state(own_ride), (RideStatus.cancelled, 2))
+        self.assertEqual(await self.ride_state(other), (RideStatus.active, 1))
+
+
 class SuspensionRaceTests(SuspensionTestBase):
     """Forced interleavings: each test pins which transaction takes the user lock first."""
 
@@ -462,6 +536,34 @@ class SuspensionRaceTests(SuspensionTestBase):
         async with self.session() as db:
             self.assertEqual(await db.scalar(select(Booking.id).where(Booking.ride_id == ride)), None)
         self.assertEqual(await self.ride_state(ride), (RideStatus.active, 2))
+
+    async def test_idempotent_booking_waits_on_user_lock_before_claiming_its_key(self):
+        # Lock order User -> Idempotency key -> Ride: while the suspension holds
+        # the user row, the keyed request must not have claimed (inserted) its key.
+        ride = await self.add_ride(driver="other_driver", seats=2)
+        async with self.session() as admin_db, self.session() as passenger_db:
+            passenger = await self.load(passenger_db, "passenger")
+            admin = await self.load(admin_db, "admin")
+            await account_service.suspend_user(admin_db, admin, passenger.id)
+            book = asyncio.create_task(booking_routes.book_ride(
+                ride_id=ride, body=None, db=passenger_db, current_user=passenger,
+                idempotency_key="fake-key-race-0001"))
+            self.assertTrue(await self.wait_until_blocked(book), "booking did not wait for the suspension")
+            async with self.engine.connect() as conn:
+                waiting_pid = await conn.scalar(text(
+                    "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
+                    "AND wait_event_type = 'Lock'"))
+                held_on_keys = await conn.scalar(text(
+                    "SELECT count(*) FROM pg_locks WHERE pid = :pid "
+                    "AND relation = 'idempotency_keys'::regclass"), {"pid": waiting_pid})
+            self.assertEqual(held_on_keys, 0, "idempotency key claimed before the user lock")
+            await admin_db.commit()
+            with self.assertRaises(HTTPException) as raised:
+                await book
+            self.assertEqual(raised.exception.status_code, 401)
+        async with self.session() as db:
+            self.assertEqual(await db.scalar(select(IdempotencyKey.key)), None)
+            self.assertEqual(await db.scalar(select(Booking.id).where(Booking.ride_id == ride)), None)
 
     async def test_booking_first_is_cancelled_by_the_waiting_suspension(self):
         ride = await self.add_ride(driver="other_driver", seats=2)

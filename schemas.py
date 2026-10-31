@@ -1,4 +1,4 @@
-from pydantic import AwareDatetime, BaseModel, EmailStr, Field, computed_field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, EmailStr, Field, StrictInt, computed_field, field_validator
 from datetime import datetime
 from typing import Literal
 from models import UserRole, RideStatus, BookingStatus
@@ -97,13 +97,30 @@ class RideResponse(BaseModel):
     status:          RideStatus
 
 
+# Hard bound per booking; equals the DB CHECK ck_bookings_seats_requested_range
+# (c1a7e0b00003). BOOKING_MAX_SEATS (lifecycle.py) may lower it at runtime.
+MAX_SEATS_PER_BOOKING = 8
+
+
+class BookingCreate(BaseModel):
+    """Optional body of POST /bookings/{ride_id}. Absent body or field = 1 seat.
+
+    StrictInt: "2", 2.0 and true are rejected instead of coerced.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    seats: StrictInt = Field(default=1, ge=1, le=MAX_SEATS_PER_BOOKING)
+
+
 class BookingResponse(BaseModel):
     model_config = {"from_attributes": True}
 
-    id:           int
-    ride_id:      int
-    passenger_id: int
-    status:       BookingStatus
+    id:              int
+    ride_id:         int
+    passenger_id:    int
+    status:          BookingStatus
+    # Additive (c1a7e0b00003): seats requested, and held once accepted.
+    seats_requested: int
 
 
 class PassengerSummary(BaseModel):

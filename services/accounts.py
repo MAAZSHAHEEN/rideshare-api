@@ -1,12 +1,15 @@
 """Account suspension and reinstatement (Milestone D, M5-A).
 
-Lock order everywhere: User -> Ride(s) by id ASC -> Booking(s) by id ASC.
-This extends the M4 order (Ride -> Booking) with the user row in front:
+Lock order everywhere: User -> (Idempotency key) -> Ride(s) by id ASC ->
+Booking(s) by id ASC. This extends the M4 order (Ride -> Booking) and the
+c1a7e0b00001 order (key -> Ride -> Booking) with the user row in front:
 
 - suspend/reinstate take FOR NO KEY UPDATE on the target user row first;
-- book_ride and create_ride take FOR SHARE on the caller's user row
-  (``lock_active_account``) before locking any ride;
+- POST /bookings/{ride_id} takes FOR SHARE on the caller's user row
+  (``lock_active_account``) before claiming an Idempotency-Key (if sent) and
+  before locking any ride; create_ride does the same before its insert;
 - every other ride/booking writer locks one Ride, then its Bookings.
+Suspension never touches idempotency_keys, so no cycle is possible.
 
 FOR NO KEY UPDATE (not FOR UPDATE) is deliberate: it conflicts with FOR SHARE
 but not with the FOR KEY SHARE that PostgreSQL takes for foreign-key checks, so
@@ -16,10 +19,15 @@ Effects of a suspension, all in the caller's single transaction:
 - account_status -> 'suspended', token_version += 1 (every issued token dies);
 - the user's future active rides (departure_time > now) -> cancelled, and
   their pending/accepted bookings -> cancelled (decision D5 recommended
-  option, auto-cancel). A cancelled ride's available_seats is restored for
-  accepted bookings, exactly as cancel_ride does;
+  option, auto-cancel). Every booking change goes through
+  ``lifecycle.apply_booking_transition``, exactly as cancel_ride does, so an
+  accepted booking returns all ``seats_requested`` seats (c1a7e0b00003);
 - the user's own pending/accepted bookings on other drivers' future active
-  rides -> cancelled, seats returned for accepted ones;
+  rides -> cancelled, all accepted seats returned;
+- a pending request that is already due (c1a7e0b00002, lazily expired but not
+  yet swept) is moved to 'expired', not 'cancelled' (no seat effect), so its
+  history reads the same as if the sweep had run first. Rows already
+  'expired', 'rejected' or 'cancelled' are never touched;
 - departed-but-not-completed rides are NOT touched (an incident may be in
   progress); their ids are returned for manual follow-up.
 Reinstatement sets 'active' and increments token_version again, so the user
@@ -30,12 +38,14 @@ the audit-log row (stacked PR) is written atomically with the change.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import booking_expiry
+import clock
+import lifecycle
 from models import AccountStatus, Booking, BookingStatus, Ride, RideStatus, User
 
 LIVE_BOOKING_STATUSES = (BookingStatus.pending, BookingStatus.accepted)
@@ -61,6 +71,7 @@ async def lock_active_account(db: AsyncSession, user_id: int) -> None:
 class SuspensionEffects:
     cancelled_ride_ids: list[int] = field(default_factory=list)
     cancelled_booking_ids: list[int] = field(default_factory=list)
+    expired_booking_ids: list[int] = field(default_factory=list)
     departed_active_ride_ids: list[int] = field(default_factory=list)
 
 
@@ -81,7 +92,7 @@ async def suspend_user(db: AsyncSession, admin: User, user_id: int) -> tuple[Use
     if user.account_status == AccountStatus.suspended.value:
         raise HTTPException(status_code=409, detail="User is already suspended")
 
-    now = datetime.now(timezone.utc)
+    now = clock.utc_now()
     effects = SuspensionEffects()
 
     # Rides whose seats change: the user's own future rides, plus the rides of
@@ -128,9 +139,12 @@ async def suspend_user(db: AsyncSession, admin: User, user_id: int) -> tuple[Use
             .execution_options(populate_existing=True)
         )).all()
         for booking in bookings:
-            if booking.status == BookingStatus.accepted:
-                rides[booking.ride_id].available_seats += 1
-            booking.status = BookingStatus.cancelled
+            ride = rides[booking.ride_id]
+            if booking_expiry.is_expired(booking, ride, now):
+                lifecycle.apply_booking_transition(ride, booking, "expire")
+                effects.expired_booking_ids.append(booking.id)
+                continue
+            lifecycle.apply_booking_transition(ride, booking, "cancel")
             effects.cancelled_booking_ids.append(booking.id)
         for ride_id in sorted(cancel_rides):
             rides[ride_id].status = RideStatus.cancelled
