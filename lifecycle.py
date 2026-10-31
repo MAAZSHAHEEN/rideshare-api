@@ -28,6 +28,9 @@ RIDE_DEPARTED = "Ride has already departed"
 NO_SEATS = "No seats available"
 ALREADY_RESPONDED = "Booking already responded to"
 NOT_CANCELLABLE = "Booking cannot be cancelled"
+# D7 (API gaps): answering a request the passenger already withdrew. Replaces
+# ALREADY_RESPONDED only for that case; accepted/rejected keep the old string.
+PASSENGER_WITHDREW = "Booking was cancelled by the passenger"
 # New in AST-016 (product decision 31 Oct 2026): completion only after departure.
 NOT_YET_DEPARTED = "Ride cannot be completed before its departure time"
 
@@ -77,6 +80,22 @@ def booking_target(status: BookingStatus, action: BookingAction) -> BookingStatu
         return BOOKING_TRANSITIONS[(status, action)]
     except KeyError:
         raise conflict(_BOOKING_CONFLICT[action]) from None
+
+
+def respond_target(booking, ride: Ride, action: BookingAction) -> BookingStatus:
+    """Driver accept/reject: like ``booking_target`` but names a withdrawal.
+
+    A ``cancelled`` booking on a still-``active`` ride can only have been
+    cancelled by its passenger: the other paths to ``cancelled`` (driver ride
+    cancellation, completion cascade) also end the ride, and those keep the
+    old ``ALREADY_RESPONDED`` string. If a future flow cancels single bookings
+    on an active ride (admin moderation, pending expiry), revisit this rule.
+    The guard order is unchanged: booking state is judged before ride state.
+    """
+    if (action in ("accept", "reject") and booking.status == BookingStatus.cancelled
+            and ride.status == RideStatus.active):
+        raise conflict(PASSENGER_WITHDREW)
+    return booking_target(booking.status, action)
 
 
 def require_ride_active(ride: Ride) -> None:

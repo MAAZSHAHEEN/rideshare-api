@@ -42,6 +42,9 @@ EXPECTED_BOOKING = {
     (B.pending, "cancel"): (B.cancelled, 0),
     (B.accepted, "cancel"): (B.cancelled, +1),
 }
+# D7: a request the passenger withdrew (cancelled booking, ride still active)
+# is reported distinctly to the driver; every other conflict keeps its string.
+WITHDREW = "Booking was cancelled by the passenger"
 BOOKING_CONFLICT = {"accept": "Booking already responded to",
                     "reject": "Booking already responded to",
                     "cancel": "Booking cannot be cancelled"}
@@ -212,6 +215,8 @@ class LifecycleApiTests(unittest.IsolatedAsyncioTestCase):
         legal = EXPECTED_BOOKING.get((booking_status, action))
         if action in ("accept", "reject"):
             if legal is None:
+                if booking_status == B.cancelled and ride_status == R.active:
+                    return 409, WITHDREW, None
                 return 409, BOOKING_CONFLICT[action], None
             if ride_status != R.active:
                 return 409, "Ride is not active", None

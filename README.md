@@ -76,8 +76,9 @@ and departed rides are excluded; there is no status override.
 
 Optional query parameters:
 
-- `origin`, `destination`: exact, case-sensitive matches; either or both may
-  be omitted. Empty strings are invalid. Whitespace is not trimmed.
+- `origin`, `destination`: whole-value matches, case-insensitive, with
+  surrounding whitespace trimmed on both sides (`lower(btrim(...))`); either or
+  both may be omitted. Empty or blank-after-trimming values return 422.
 - `departure_from`: inclusive lower departure bound.
 - `departure_before`: exclusive upper departure bound. Both time bounds require
   a timezone offset; when supplied together, the lower must precede the upper.
@@ -185,9 +186,13 @@ All endpoints below require a bearer token. `GET /me` returns the typed
   response, including departed, sold-out, completed and cancelled rides. Missing
   rides return 404.
 - `GET /rides/me`: ordinary accounts in their driver capacity; returns only their own rides, with optional
-  `status=active|completed|cancelled`, ordered by departure time DESC, id DESC.
+  `status=active|completed|cancelled`, `departure_from`/`departure_before` (aware, `[from, before)`),
+  `when=upcoming|departed` (`departure_time > now` / `<= now`) and `order=desc|asc`
+  (default departure time DESC, id DESC).
+- `GET /rides/me/booking-counts?ride_id=…` (1–100 ids): booking counts by status for the caller's own
+  rides; other drivers' or unknown rides are omitted.
 - `GET /bookings/me`: ordinary accounts in their passenger capacity; returns only their bookings, each with
-  a nested `ride` containing the existing ride response fields.
+  a nested `ride` containing the existing ride response fields. Optional `ride_id` narrows to that ride.
 - `GET /rides/{ride_id}/bookings`: owning driver only; each booking includes
   `passenger: {id, name}`. No passenger email, CNIC, phone or password is returned.
   Non-owners/admin accounts receive 403; an eligible account lookup of a missing
@@ -198,6 +203,9 @@ Both booking lists order by booking id DESC and accept optional
 by default and return plain lists with `limit` (default 20, range 1–100) and
 `offset` (default 0, range 0–9223372036854775807). Filters apply before pagination;
 invalid values return 422. These reads do not change lifecycle rules or seats.
+Every list (`GET /rides/`, `/rides/me`, `/bookings/me`, `/rides/{id}/bookings`) sends
+`X-Total-Count`: the number of rows matching the filters, ignoring `limit`/`offset`
+(exposed over CORS together with `Retry-After`). See docs/api/API_GAPS_CLOSED.md.
 
 Set `FRONTEND_ORIGINS` to a comma-separated list of exact HTTP(S) frontend origins,
 for example `http://localhost:5173,http://127.0.0.1:5173` in development. Configure

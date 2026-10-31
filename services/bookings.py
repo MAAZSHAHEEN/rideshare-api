@@ -15,7 +15,7 @@ an additional exception translation layer.
 """
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,26 +27,36 @@ from schemas import DriverBookingResponse, PassengerBookingResponse, PassengerSu
 
 async def list_my_bookings(
     db: AsyncSession, current_user: User, *,
-    status: BookingStatus | None = None, limit: int = 20, offset: int = 0,
-) -> list[PassengerBookingResponse]:
+    status: BookingStatus | None = None, ride_id: int | None = None,
+    limit: int = 20, offset: int = 0,
+) -> tuple[list[PassengerBookingResponse], int]:
+    """The caller's own bookings (newest first) and the matching total.
+
+    ``ride_id`` narrows to "my bookings for this ride" (G2). It never widens:
+    the passenger_id condition always applies, so another user's ride or
+    booking yields an empty list, not an error that would confirm it exists.
+    """
     if "passenger" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only passengers can list their bookings")
-    query = select(Booking, Ride).join(Ride, Booking.ride_id == Ride.id).where(
-        Booking.passenger_id == current_user.id,
-    )
+    conditions = [Booking.passenger_id == current_user.id]
     if status is not None:
-        query = query.where(Booking.status == status)
+        conditions.append(Booking.status == status)
+    if ride_id is not None:
+        conditions.append(Booking.ride_id == ride_id)
+    query = select(Booking, Ride).join(Ride, Booking.ride_id == Ride.id).where(*conditions)
     rows = await db.execute(query.order_by(Booking.id.desc()).limit(limit).offset(offset))
-    return [PassengerBookingResponse(
+    items = [PassengerBookingResponse(
         id=booking.id, ride_id=booking.ride_id, passenger_id=booking.passenger_id,
         status=booking.status, ride=RideResponse.model_validate(ride),
     ) for booking, ride in rows]
+    total = await db.scalar(select(func.count()).select_from(Booking).where(*conditions))
+    return items, total
 
 
 async def list_ride_bookings(
     ride_id: int, db: AsyncSession, current_user: User, *,
     status: BookingStatus | None = None, limit: int = 20, offset: int = 0,
-) -> list[DriverBookingResponse]:
+) -> tuple[list[DriverBookingResponse], int]:
     if "driver" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only drivers can list ride bookings")
     driver_id = await db.scalar(select(Ride.driver_id).where(Ride.id == ride_id))
@@ -55,16 +65,19 @@ async def list_ride_bookings(
     if driver_id != current_user.id:
         raise HTTPException(status_code=403, detail="This is not your ride")
     # Project only the passenger fields allowed in the response; no contact data.
+    conditions = [Booking.ride_id == ride_id]
+    if status is not None:
+        conditions.append(Booking.status == status)
     query = select(Booking, User.id, User.name).join(
         User, Booking.passenger_id == User.id,
-    ).where(Booking.ride_id == ride_id)
-    if status is not None:
-        query = query.where(Booking.status == status)
+    ).where(*conditions)
     rows = await db.execute(query.order_by(Booking.id.desc()).limit(limit).offset(offset))
-    return [DriverBookingResponse(
+    items = [DriverBookingResponse(
         id=booking.id, ride_id=booking.ride_id, passenger_id=booking.passenger_id,
         status=booking.status, passenger=PassengerSummary(id=user_id, name=name),
     ) for booking, user_id, name in rows]
+    total = await db.scalar(select(func.count()).select_from(Booking).where(*conditions))
+    return items, total
 
 
 async def cancel_booking(
@@ -233,7 +246,7 @@ async def respond_to_booking(
 
         action = "accept" if accept else "reject"
         # Guard order is part of the contract: booking state, then ride state.
-        lifecycle.booking_target(booking.status, action)
+        lifecycle.respond_target(booking, ride, action)
         lifecycle.require_ride_active(ride)
 
         if accept:
