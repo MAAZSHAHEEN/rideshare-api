@@ -44,13 +44,25 @@ strings and guard order are unchanged from PR #2 (API contract).
 | From | Action / endpoint | Who | Guards, in order | To | Seat effect | Success | Failures |
 |---|---|---|---|---|---|---|---|
 | — | create `POST /rides/` | any ordinary account (driver capability) | role → `departure_time` aware (422 from schema) → departure strictly after now | `active` | `available_seats` = requested | 201 | 403 role; 422 naive/past/now |
-| `active` | complete `PATCH /rides/{id}/complete` | owning driver | role → lock ride → exists → owner → transition | `completed` | none; pending bookings → `cancelled` (0 seats each) | 200 | 403, 404, 409 `Ride is not active` |
+| `active` | complete `PATCH /rides/{id}/complete` | owning driver | role → lock ride → exists → owner → transition → **departed** (`departure_time <= now`, after the lock) | `completed` | none; pending bookings → `cancelled` (0 seats each) | 200 | 403, 404, 409 `Ride is not active`, 409 `Ride cannot be completed before its departure time` |
 | `active` | cancel `PATCH /rides/{id}/cancel` | owning driver | role → lock ride → exists → owner → transition | `cancelled` | +1 per accepted booking; pending and accepted → `cancelled` | 200 | 403, 404, 409 `Ride is not active` |
 | `completed` / `cancelled` | any | — | — | — | — | — | 409 `Ride is not active` (terminal; no reopen) |
 
 Notes:
-- Completion has **no departure check** (gap G1, audit B4): a driver can mark a
-  ride completed the day before it leaves.
+- Completion is allowed **only at or after the scheduled departure** (G1 closed,
+  AST-016; product decision 31 Oct 2026, no grace window). Before departure:
+  409 `Ride cannot be completed before its departure time`, nothing changes.
+  The check runs after the Ride lock and after the status guard, so a terminal
+  ride still answers `Ride is not active`. Boundary inclusive, like
+  `has_departed`: `== departure_time` is allowed, one microsecond earlier is not.
+  [`test_completion_before_departure_is_refused_without_side_effects`,
+  `test_completion_at_exact_departure_instant_is_allowed`,
+  `test_terminal_ride_reports_not_active_before_departure`,
+  `test_completion_waiting_on_ride_lock_is_judged_when_it_proceeds`]
+- Consequence: booking/acceptance (before departure only) and completion (after
+  departure only) can never both succeed at one instant. The race tests in
+  `test_booking_responses.py` model this with a per-request clock: the completion
+  runs after departure, the other request before it.
 - Cancellation has **no departure cut-off**, by design: a driver who does not
   turn up can still release passengers. [`test_driver_may_still_cancel_a_departed_ride`]
 - Nothing closes a ride automatically (gap G3). A departed ride stays `active`
@@ -87,7 +99,7 @@ Departure-related rules after this branch:
 | passenger withdraws a pending request | allowed |
 | passenger cancels an accepted booking | **409 `Ride has already departed`, seat not restored** [this branch] |
 | driver cancels the ride | allowed |
-| driver completes the ride | allowed (also allowed *before* departure — gap G1) |
+| driver completes the ride | allowed **only** from departure on (409 before; G1 closed) |
 
 ## 3. Locking
 
@@ -148,7 +160,7 @@ Residual windows (accepted, documented):
 
 | ID | Gap | Impact | Fix | Kind |
 |---|---|---|---|---|
-| G1 | Completion allowed before departure (audit B4) | driver can close a ride early; cancels pending requests | 409 before departure (optional grace). Code-only but changes driver-UI behaviour and ~25 existing tests complete future rides | (a) deferred, needs decision |
+| G1 | Completion allowed before departure (audit B4) | driver can close a ride early; cancels pending requests | 409 before departure, no grace (decision 31 Oct 2026) | **(a) closed on this branch (AST-016)** |
 | G2 | Accepted booking cancellable after departure; seat restored on a departed ride, no-show hidden | wrong history, misleading seat count | cut-off at departure | (a) **done on this branch** |
 | G3 | Departed rides stay `active` forever (B1) | stale "active" in My rides/My bookings | worker closure (§6.2); interim: UI labels "Departed" from `departure_time` | (b) |
 | G4 | Pending requests never expire (B7) | passengers wait indefinitely; only blocked at departure (accept 409) | `expires_at` + worker (§6.1) | (b) |
@@ -204,10 +216,9 @@ product wants a confirmation buffer).
   verified**), and ideally `rides.closed_by` (`driver`/`system`) and
   `rides.closed_at` so the UI can say "closed automatically". Both nullable,
   additive; rollback drops the columns. No new ride enum value is needed.
-- Code-only interim: G1 (complete only after departure). Recommend shipping it
-  with a 30-minute grace before departure once Maaz confirms the driver UI
-  behaviour; it requires updating the ~25 existing completion tests to freeze
-  `clock.utc_now` after departure.
+- G1 (complete only after departure) shipped code-only on this branch with no
+  grace window (product decision 31 Oct 2026). The worker in 6.2 must use the
+  same `has_departed` rule.
 
 ### 6.3 Cancellation cut-off
 - **Implemented (code-only):** accepted bookings can't be cancelled at or after
@@ -287,8 +298,8 @@ product wants a confirmation buffer).
 4. Exhaustive state × action matrix (unit + HTTP on PostgreSQL), departure
    boundary tests, `asyncio.gather` concurrency and seat-conservation tests.
 
-**(a) Code-only, deferred pending a decision:** G1 completion-after-departure
-(+ grace), G10 404-for-non-owners.
+**(a) Code-only:** G1 completion-after-departure — done on this branch (no
+grace). Deferred pending a decision: G10 404-for-non-owners.
 
 **(b) Schema-changing — design only, each its own PR with migration test,
 pre-flight query and rollback:** 6.1 expiry (`expires_at`, enum `expired`), 6.2

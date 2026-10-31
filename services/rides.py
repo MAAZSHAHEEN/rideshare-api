@@ -64,6 +64,10 @@ async def complete_ride(
         if ride.driver_id != current_user.id:
             raise HTTPException(status_code=403, detail="This is not your ride")
         target = lifecycle.ride_target(ride.status, "complete")
+        # Judged after the Ride lock and the status guard (guard order: 404,
+        # 403, "Ride is not active", then time), so a completed/cancelled ride
+        # keeps answering "Ride is not active" whatever the clock says.
+        lifecycle.require_departed_for_completion(ride)
 
         # The Ride lock serializes all booking writers. Only pending bookings
         # change on completion; accepted bookings retain their consumed seats.

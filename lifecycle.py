@@ -28,6 +28,8 @@ RIDE_DEPARTED = "Ride has already departed"
 NO_SEATS = "No seats available"
 ALREADY_RESPONDED = "Booking already responded to"
 NOT_CANCELLABLE = "Booking cannot be cancelled"
+# New in AST-016 (product decision 31 Oct 2026): completion only after departure.
+NOT_YET_DEPARTED = "Ride cannot be completed before its departure time"
 
 RIDE_TRANSITIONS: dict[tuple[RideStatus, RideAction], RideStatus] = {
     (RideStatus.active, "complete"): RideStatus.completed,
@@ -86,6 +88,18 @@ def require_ride_active(ride: Ride) -> None:
 def require_not_departed(ride: Ride, now: datetime | None = None) -> None:
     if clock.has_departed(ride.departure_time, now):
         raise conflict(RIDE_DEPARTED)
+
+
+def require_departed_for_completion(ride: Ride, now: datetime | None = None) -> None:
+    """A ride can be completed only at or after its scheduled departure.
+
+    Product decision (Maaz, 31 Oct 2026): no grace window before departure.
+    The boundary is the same inclusive instant as ``has_departed``: at exactly
+    ``departure_time`` the ride has departed, so completion is allowed, while
+    one microsecond earlier it is refused with 409 ``NOT_YET_DEPARTED``.
+    """
+    if not clock.has_departed(ride.departure_time, now):
+        raise conflict(NOT_YET_DEPARTED)
 
 
 def apply_booking_transition(ride: Ride, booking, action: BookingAction) -> None:

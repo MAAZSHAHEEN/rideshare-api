@@ -114,6 +114,19 @@ class TransitionTableTests(unittest.TestCase):
         self.assertTrue(lifecycle.accepted_cancellation_closed(
             ride, now=datetime(2026, 11, 3, 8, 0, tzinfo=pkt)))
 
+    def test_completion_requires_departure_boundary_is_inclusive(self):
+        departure = datetime(2026, 11, 3, 3, 0, tzinfo=timezone.utc)
+        ride = _Ride(departure=departure)
+        lifecycle.require_departed_for_completion(ride, now=departure)  # allowed
+        lifecycle.require_departed_for_completion(ride, now=departure + timedelta(hours=5))
+        for early in (departure - timedelta(microseconds=1), departure - timedelta(days=1),
+                      datetime(2026, 11, 3, 7, 59, 59, 999999, tzinfo=timezone(timedelta(hours=5)))):
+            with self.subTest(now=early.isoformat()):
+                with self.assertRaises(HTTPException) as raised:
+                    lifecycle.require_departed_for_completion(ride, now=early)
+                self.assertEqual((raised.exception.status_code, raised.exception.detail),
+                                 (409, "Ride cannot be completed before its departure time"))
+
 
 @unittest.skipUnless(TEST_DATABASE_URL, "Set TEST_DATABASE_URL to a PostgreSQL test database")
 class LifecycleApiTests(unittest.IsolatedAsyncioTestCase):
@@ -231,9 +244,13 @@ class LifecycleApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_ride_matrix_every_ride_state_and_action(self):
         for ride_status, action in product(RideStatus, ("ride_complete", "ride_cancel", "book")):
             with self.subTest(ride=ride_status.value, action=action):
-                ride_id, _ = await self.seed(ride_status=ride_status)
+                departure = datetime.now(timezone.utc) + timedelta(days=1)
+                ride_id, _ = await self.seed(ride_status=ride_status, departure=departure)
                 before = await self.state(ride_id)
-                response = await self.act(action, ride_id=ride_id)
+                # Completion is judged after departure (AST-016); booking before it.
+                at = departure if action == "ride_complete" else departure - timedelta(hours=1)
+                with patch("clock.utc_now", return_value=at):
+                    response = await self.act(action, ride_id=ride_id)
                 if ride_status != R.active:
                     self.assertEqual(response.status_code, 409, response.text)
                     self.assertEqual(response.json(), {"detail": "Ride is not active"})
@@ -384,7 +401,12 @@ class LifecycleApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.state(ride_id), (R.cancelled, 1, [B.cancelled]))
 
     async def test_ride_completion_vs_cancellation_has_one_terminal_winner(self):
-        ride_id, booking_id = await self.seed(seats=1, booking_status=B.pending)
+        # After departure (completion is only possible then, AST-016): complete,
+        # cancel and a late acceptance race; exactly one terminal state wins and
+        # the departed ride never gains an accepted passenger.
+        ride_id, booking_id = await self.seed(
+            seats=1, booking_status=B.pending,
+            departure=datetime.now(timezone.utc) - timedelta(minutes=1))
         responses = await asyncio.wait_for(asyncio.gather(
             self.act("ride_complete", ride_id=ride_id), self.act("ride_cancel", ride_id=ride_id),
             self.act("accept", booking_id=booking_id),
@@ -392,8 +414,18 @@ class LifecycleApiTests(unittest.IsolatedAsyncioTestCase):
         status, seats, bookings = await self.state(ride_id)
         self.assertIn(status, (R.completed, R.cancelled))
         self.assertEqual(sorted(r.status_code for r in responses[:2]), [200, 409])
-        self.assertGreaterEqual(seats, 0)
-        self.assertEqual(seats + (bookings == [B.accepted]), 1)
+        self.assertEqual(responses[2].status_code, 409, responses[2].text)
+        self.assertEqual((seats, bookings), (1, [B.cancelled]))
+
+    async def test_completion_vs_cancellation_before_departure_only_cancel_can_win(self):
+        ride_id, booking_id = await self.seed(seats=1, booking_status=B.accepted)
+        responses = await asyncio.wait_for(asyncio.gather(
+            self.act("ride_complete", ride_id=ride_id), self.act("ride_cancel", ride_id=ride_id),
+        ), timeout=20)
+        self.assertEqual([r.status_code for r in responses], [409, 200])
+        self.assertIn(responses[0].json()["detail"],
+                      ("Ride cannot be completed before its departure time", "Ride is not active"))
+        self.assertEqual(await self.state(ride_id), (R.cancelled, 2, [B.cancelled]))
 
 
 if __name__ == "__main__":

@@ -114,6 +114,10 @@ receive new bookings. Concurrent booking actions serialize on the same Ride lock
 `PATCH /rides/{ride_id}/complete` lets only the owning driver transition an active
 ride to completed and returns the existing ride JSON (200). Missing rides return
 404; completed/cancelled rides return 409; non-owners and admins receive 403. There is no reopening or automatic time-based completion.
+A ride can be completed only at or after its scheduled `departure_time`
+(inclusive, judged after the Ride lock with `clock.utc_now()`); earlier requests
+return 409 `{"detail": "Ride cannot be completed before its departure time"}` and
+change nothing.
 
 Completion locks and refreshes the Ride, then locks pending bookings in ID order.
 Pending requests become cancelled, while accepted/rejected/cancelled history is
