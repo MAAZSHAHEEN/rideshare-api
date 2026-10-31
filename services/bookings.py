@@ -12,7 +12,14 @@ Use a clean session; these operations are not independently composable transacti
 
 HTTPException intentionally preserves the existing API error contract without
 an additional exception translation layer.
+
+``before_commit`` (book_ride, respond_to_booking): optional coroutine called
+with the flushed booking inside the same transaction, after every guard passed
+and immediately before commit. The idempotency layer uses it to store the
+response with the business write, so both commit or roll back together.
 """
+
+from collections.abc import Awaitable, Callable
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -23,6 +30,8 @@ import lifecycle
 from models import Booking, BookingStatus, Ride, User
 from permissions import allowed_modes
 from schemas import DriverBookingResponse, PassengerBookingResponse, PassengerSummary, RideResponse
+
+BeforeCommit = Callable[[Booking], Awaitable[None]]
 
 
 async def list_my_bookings(
@@ -122,6 +131,7 @@ async def book_ride(
     ride_id: int,
     db: AsyncSession,
     current_user: User,
+    before_commit: BeforeCommit | None = None,
 ) -> Booking:
     try:
         # Passenger capability comes from the authenticated database account
@@ -165,6 +175,9 @@ async def book_ride(
             passenger_id=current_user.id,
         )
         db.add(booking)
+        if before_commit is not None:
+            await db.flush()  # assigns the id; a unique-index race raises here
+            await before_commit(booking)
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
@@ -190,6 +203,7 @@ async def respond_to_booking(
     accept: bool,
     db: AsyncSession,
     current_user: User,
+    before_commit: BeforeCommit | None = None,
 ) -> Booking:
     try:
         # Driver capability does not depend on a frontend-selected mode
@@ -242,6 +256,8 @@ async def respond_to_booking(
             lifecycle.require_not_departed(ride)
         # Debits one seat on acceptance; 409 "No seats available" if none left.
         lifecycle.apply_booking_transition(ride, booking, action)
+        if before_commit is not None:
+            await before_commit(booking)
 
         await db.commit()
     except Exception:

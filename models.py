@@ -1,7 +1,8 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, Index, Integer, String, DateTime, Enum as SAEnum, ForeignKey, func, text
+from sqlalchemy import CheckConstraint, Column, Index, Integer, PrimaryKeyConstraint, SmallInteger, String, DateTime, Enum as SAEnum, ForeignKey, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
 
@@ -80,3 +81,28 @@ class Booking(Base):
     passenger_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     status     = Column(SAEnum(BookingStatus), nullable=False, default=BookingStatus.pending)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class IdempotencyKey(Base):
+    """Stored outcome of a write sent with an Idempotency-Key header.
+
+    Created by c1a7e0b00001. One row per (user, key); see idempotency.py and
+    docs/architecture/BOOKING_SCHEMA_CHANGES.md. ``status_code`` and
+    ``response_body`` are only NULL inside the claiming transaction: the
+    response is written before that transaction commits.
+    """
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        PrimaryKeyConstraint('user_id', 'key', name='pk_idempotency_keys'),
+        CheckConstraint("char_length(key::text) >= 1", name='ck_idempotency_keys_key_length'),
+        Index('ix_idempotency_keys_expires_at', 'expires_at'),
+    )
+
+    user_id       = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    key           = Column(String(64), nullable=False)
+    operation     = Column(String(32), nullable=False)
+    request_hash  = Column(String(64), nullable=False)
+    status_code   = Column(SmallInteger, nullable=True)
+    response_body = Column(JSONB, nullable=True)
+    created_at    = Column(DateTime(timezone=True), nullable=False)
+    expires_at    = Column(DateTime(timezone=True), nullable=False)
