@@ -18,6 +18,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import clock
+import lifecycle
 from models import Booking, BookingStatus, Ride, RideStatus, User
 from permissions import allowed_modes
 from schemas import RideCreate
@@ -61,8 +63,11 @@ async def complete_ride(
             raise HTTPException(status_code=404, detail="Ride not found")
         if ride.driver_id != current_user.id:
             raise HTTPException(status_code=403, detail="This is not your ride")
-        if ride.status != RideStatus.active:
-            raise HTTPException(status_code=409, detail="Ride is not active")
+        target = lifecycle.ride_target(ride.status, "complete")
+        # Judged after the Ride lock and the status guard (guard order: 404,
+        # 403, "Ride is not active", then time), so a completed/cancelled ride
+        # keeps answering "Ride is not active" whatever the clock says.
+        lifecycle.require_departed_for_completion(ride)
 
         # The Ride lock serializes all booking writers. Only pending bookings
         # change on completion; accepted bookings retain their consumed seats.
@@ -73,8 +78,8 @@ async def complete_ride(
             .execution_options(populate_existing=True)
         )).all()
         for booking in pending:
-            booking.status = BookingStatus.cancelled
-        ride.status = RideStatus.completed
+            lifecycle.apply_booking_transition(ride, booking, "cancel")
+        ride.status = target
         await db.commit()
     except Exception:
         await db.rollback()
@@ -101,8 +106,7 @@ async def cancel_ride(
             raise HTTPException(status_code=404, detail="Ride not found")
         if ride.driver_id != current_user.id:
             raise HTTPException(status_code=403, detail="This is not your ride")
-        if ride.status != RideStatus.active:
-            raise HTTPException(status_code=409, detail="Ride is not active")
+        target = lifecycle.ride_target(ride.status, "cancel")
 
         # All booking writers lock Ride first. Holding it prevents new bookings
         # or decisions while we lock the live bookings in a consistent order.
@@ -114,11 +118,10 @@ async def cancel_ride(
             .execution_options(populate_existing=True)
         )).all()
         for booking in bookings:
-            if booking.status == BookingStatus.accepted:
-                # Reverse a known debit, without inferring an original capacity.
-                ride.available_seats += 1
-            booking.status = BookingStatus.cancelled
-        ride.status = RideStatus.cancelled
+            # Accepted bookings reverse their known debit (+1 seat), without
+            # inferring an original capacity; pending ones change no seats.
+            lifecycle.apply_booking_transition(ride, booking, "cancel")
+        ride.status = target
         await db.commit()
     except Exception:
         await db.rollback()
@@ -139,7 +142,7 @@ async def create_ride(
             raise HTTPException(status_code=403, detail="Only drivers can create rides")
 
         departure_time = ride_data.departure_time.astimezone(timezone.utc)
-        if departure_time <= datetime.now(timezone.utc):
+        if clock.has_departed(departure_time):
             raise HTTPException(status_code=422, detail="Departure time must be in the future")
 
         new_ride = Ride(
@@ -182,7 +185,9 @@ async def search_rides(
     query = select(Ride).where(
         Ride.status == RideStatus.active,
         Ride.available_seats >= min_seats,
-        Ride.departure_time > datetime.now(timezone.utc),
+        # Same clock and inclusive boundary as the booking guards: a ride at
+        # exactly "now" has departed and is no longer listed.
+        Ride.departure_time > clock.utc_now(),
     )
     if origin is not None:
         query = query.where(Ride.origin == origin)
