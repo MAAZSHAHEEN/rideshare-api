@@ -83,7 +83,7 @@ describe('driver ride: incoming requests', () => {
 
   const conflicts: [string, string, RegExp][] = [
     ['already responded', 'Booking already responded to', /^This request was already answered\./],
-    ['withdrawn by the passenger (D7)', 'Booking was cancelled by the passenger', /passenger withdrew this request/],
+    ['withdrawn by the passenger (D7) — neutral R-1 copy', 'Booking was cancelled by the passenger', /^This booking is no longer available\.$/],
     ['insufficient seats', 'No seats available', /No seats are left/],
     ['departed', 'Ride has already departed', /already departed/],
     ['concurrent (unknown detail)', 'deadlock detected', /changed at the same time/],

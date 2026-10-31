@@ -124,6 +124,46 @@ test.describe('D-RC-2: API unreachable during a reload', () => {
     expect(await stored(page)).toBe(before);
   });
 
+  test('R-6: the retry screen shows a neutral header (brand only), then the role nav after Retry', async ({ page }, testInfo) => {
+    const api = await mockApi(page);
+    await signIn(page);
+    const header = page.locator('header.site-header');
+    await expect(header.getByRole('link', { name: 'My dashboard' })).toBeVisible();
+    const up = api.handlers['/me'];
+    api.handlers['/me'] = route => route.abort('connectionrefused');
+    await page.reload();
+    const heading = page.getByRole('heading', { level: 1, name: 'Can’t reach RideShare' });
+    await expect(heading).toBeVisible();
+    await expect(heading).toBeFocused();
+    await expect(page.getByRole('alert')).toContainText('You’re still signed in on this tab.');
+    // Brand only: no sign-in / register links (the visitor is still signed in), no role or mode nav.
+    await expect(header.getByRole('link', { name: 'RideShare home' })).toBeVisible();
+    await expect(header.getByRole('link')).toHaveCount(1);
+    await expect(header.getByRole('navigation')).toHaveCount(0);
+    await expect(page.getByRole('link', { name: /log in|sign in/i })).toHaveCount(0);
+    await expect(page.getByRole('link', { name: /get started|register|join rideshare/i })).toHaveCount(0);
+    await expect(page.locator('a[href="/login"], a[href="/register"]')).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: 'Travel mode' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+    const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']).analyze();
+    await testInfo.attach('axe-restore-failed-neutral.json', { body: JSON.stringify(results.violations, null, 2), contentType: 'application/json' });
+    expect(results.violations.map(v => v.id)).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath('r6-neutral-header.png'), fullPage: true });
+    // Keyboard: Tab from the focused heading reaches Retry.
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeFocused();
+    api.handlers['/me'] = up;
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('heading', { name: 'Your journey is just beginning.' })).toBeVisible();
+    await expect(header.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'My dashboard' })).toBeVisible();
+    await expect(header.getByRole('button', { name: 'Log out' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Travel mode' })).toBeVisible();
+    await expect(page.getByRole('link', { name: /log in/i })).toHaveCount(0);
+    await expect(page.locator('#main-content')).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath('r6-recovered.png'), fullPage: true });
+  });
+
   test('a 503 during restore recovers on its own when the browser comes back online', async ({ page, context }) => {
     const api = await mockApi(page);
     await signIn(page);

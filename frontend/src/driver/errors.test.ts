@@ -13,14 +13,19 @@ describe('driver error copy', () => {
     expect(driverErrorMessage(conflict('Ride is not active'), 'accept')).toMatch(/no longer active/);
     expect(driverErrorMessage(conflict('Ride is not active'), 'cancel-ride')).toMatch(/already cancelled or completed/);
   });
-  it('D7: a request withdrawn by the passenger gets its own copy on accept and reject', () => {
+  it('R-1: a cancelled booking (withdrawn, or cancelled by a suspension) gets exactly the neutral copy on accept and reject', () => {
     for (const action of ['accept', 'reject'] as const) {
-      const message = driverErrorMessage(conflict('Booking was cancelled by the passenger'), action);
-      expect(message).toBe('The passenger withdrew this request, so it can’t be answered. The list has been refreshed.');
-      expect(driverErrorMessage(conflict('Booking already responded to'), action)).not.toMatch(/withdrew/);
+      for (const detail of ['Booking was cancelled by the passenger', 'This booking is no longer available', 'This booking is no longer available.']) {
+        const message = driverErrorMessage(conflict(detail), action);
+        expect(message).toBe('This booking is no longer available.');
+        // Never says who cancelled it (passenger vs. suspension).
+        expect(message).not.toMatch(/passenger|withdr|suspend/i);
+      }
+      expect(driverErrorMessage(conflict('Booking already responded to'), action)).not.toBe('This booking is no longer available.');
     }
     // Not a ride-level conflict: cancel/complete keep the generic copy.
     expect(driverErrorMessage(conflict('Booking was cancelled by the passenger'), 'cancel-ride')).toMatch(/changed at the same time/);
+    expect(driverErrorMessage(conflict('This booking is no longer available'), 'complete-ride')).toMatch(/changed at the same time/);
   });
   it('AST-016: early completion has specific copy; it is not mapped for other actions', () => {
     expect(driverErrorMessage(conflict('Ride cannot be completed before its departure time'), 'complete-ride')).toBe('This ride can be marked completed only after its departure time.');

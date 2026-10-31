@@ -211,7 +211,7 @@ test.describe('driver journey (mocked API)', () => {
 
   const conflicts: [string, string, RegExp][] = [
     ['already responded', 'Booking already responded to', /^This request was already answered\. The list has been refreshed/],
-    ['withdrawn by the passenger (D7)', 'Booking was cancelled by the passenger', /^The passenger withdrew this request, so it can’t be answered\./],
+    ['withdrawn by the passenger (D7) — neutral R-1 copy', 'Booking was cancelled by the passenger', /^This booking is no longer available\.$/],
     ['expired (#20)', 'Booking request has expired', /^This request expired before it was answered/],
     ['insufficient seats', 'No seats available', /No seats are left on this ride/],
     ['departed', 'Ride has already departed', /already departed, so requests can no longer be accepted/],
@@ -253,7 +253,7 @@ test.describe('driver journey (mocked API)', () => {
     await expect(page.getByText('2 pending · 0 accepted')).toBeVisible();
     api.bookings.find(b => b.id === 70)!.status = 'cancelled';
     await page.getByRole('button', { name: 'Accept request from Asha Test' }).click();
-    await expect(page.getByRole('alert')).toHaveText('The passenger withdrew this request, so it can’t be answered. The list has been refreshed.');
+    await expect(page.getByRole('alert')).toHaveText('This booking is no longer available.');
     await expect(page.getByRole('heading', { name: 'Cancelled (2)' })).toBeVisible();
     await expect(page.getByText('1 pending · 0 accepted')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Accept request from Asha Test' })).toHaveCount(0);

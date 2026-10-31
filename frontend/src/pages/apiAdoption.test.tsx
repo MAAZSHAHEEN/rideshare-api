@@ -226,7 +226,8 @@ describe('driver ride: counts, totals, expired, D7', () => {
     expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['Pending (1)', 'Expired (1)']);
   });
   it.each([
-    ['Booking was cancelled by the passenger', 'The passenger withdrew this request, so it can’t be answered. The list has been refreshed.'],
+    ['Booking was cancelled by the passenger', 'This booking is no longer available.'],
+    ['This booking is no longer available', 'This booking is no longer available.'],
     ['Booking request has expired', 'This request expired before it was answered, so it can’t be accepted. The list has been refreshed.'],
   ])('accept 409 "%s" shows fixed copy and refetches', async (detail, copy) => {
     let reads = 0;
