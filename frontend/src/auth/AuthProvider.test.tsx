@@ -2,7 +2,8 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
-import { AuthProvider, useAuth } from './AuthProvider';
+import { AuthProvider, resetPageUnloadingForTests, safeReturnPath, useAuth } from './AuthProvider';
+import { SESSION_KEY } from './sessionStore';
 import type { User } from '../api/types';
 
 const user: User = { id: 1, name: 'Ayesha', email: 'a@example.com', role: 'passenger', allowed_modes: ['passenger', 'driver'] };
@@ -15,7 +16,9 @@ function Probe() {
     <button onClick={auth.logout}>Logout</button>
     <button onClick={() => auth.selectMode("passenger")}>Passenger Mode</button>
     <button onClick={() => auth.selectMode("driver")}>Driver Mode</button>
-    <button onClick={() => void auth.api.myBookings(0).catch(() => {})}>Fetch</button></>;
+    <button onClick={() => void auth.api.myBookings(0).catch(() => {})}>Fetch</button>
+    <p>{auth.restoreFailed ? 'Restore failed' : auth.restoring ? 'Restoring' : 'Settled'}</p>
+    <button onClick={auth.retryRestore}>Retry restore</button></>;
 }
 function mount() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -23,7 +26,7 @@ function mount() {
   return queryClient;
 }
 
-describe('memory-only verified sessions', () => {
+describe('verified sessions', () => {
   it.each(['passenger', 'driver'] as const)('switches a legacy %s account without replacing its token or private cache', async role => {
     const originalToken = token();
     const fetcher = vi.fn().mockResolvedValueOnce(json({ access_token: originalToken, token_type: 'bearer' }))
@@ -79,7 +82,7 @@ describe('memory-only verified sessions', () => {
     expect(screen.getByText('Signed out')).toBeInTheDocument();
   });
 
-  it('uses /me identity rather than JWT role, then clears cache on logout', async () => {
+  it('uses /me identity rather than JWT role, then clears cache and the tab session on logout', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(json({ access_token: token(), token_type: 'bearer' })).mockResolvedValueOnce(json(user));
     vi.stubGlobal('fetch', fetcher);
     const storage = vi.spyOn(Storage.prototype, 'setItem');
@@ -91,7 +94,13 @@ describe('memory-only verified sessions', () => {
     await userEvent.click(screen.getByText('Logout'));
     expect(screen.getByText('Signed out')).toBeInTheDocument();
     expect(client.getQueryCache().getAll()).toHaveLength(0);
-    expect(storage).not.toHaveBeenCalled();
+    // AST-023: only the tab-scoped session key is ever written, never to localStorage, never the profile.
+    expect(storage.mock.contexts.every(context => context === window.sessionStorage)).toBe(true);
+    expect(storage.mock.calls.map(([key]) => key)).toEqual([SESSION_KEY]);
+    expect(storage.mock.calls[0][1]).not.toContain(user.email);
+    expect(storage.mock.calls[0][1]).not.toContain(user.name);
+    expect(window.sessionStorage.length).toBe(0);
+    expect(window.localStorage.length).toBe(0);
   });
   it('never authenticates when identity verification fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ access_token: token(), token_type: 'bearer' })).mockResolvedValueOnce(json({ detail: 'Invalid token' }, 401)));
@@ -136,17 +145,131 @@ describe('memory-only verified sessions', () => {
     await act(async () => { finish(json({ detail: 'Invalid token' }, 401)); });
     expect(screen.getByText('New user:passenger')).toBeInTheDocument();
   });
-  it('expires an idle session using the JWT expiry timer', async () => {
-    const expiry = Math.floor(Date.now() / 1000) + 3600;
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ access_token: `h.${btoa(JSON.stringify({ exp: expiry }))}.s`, token_type: 'bearer' })).mockResolvedValueOnce(json(user)));
+  it('expires an idle session using the expiry timer (monotonic clock, server lifetime exp − iat)', async () => {
+    const iat = Math.floor(Date.now() / 1000);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ access_token: `h.${btoa(JSON.stringify({ iat, exp: iat + 3600 }))}.s`, token_type: 'bearer' })).mockResolvedValueOnce(json(user)));
     const client = mount();
     await userEvent.click(screen.getByText('Login'));
     await screen.findByText('Ayesha:passenger');
     client.setQueryData(['private'], 'secret');
-    vi.spyOn(Date, 'now').mockReturnValue((expiry + 1) * 1000);
+    // D-RC-1: the wall clock alone moving past exp does not expire the session…
+    const wall = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(wall + 3_601_000);
+    act(() => window.dispatchEvent(new Event('focus')));
+    expect(screen.getByText('Ayesha:passenger')).toBeInTheDocument();
+    // …the monotonic clock passing the server lifetime does.
+    const mono = performance.now();
+    vi.spyOn(performance, 'now').mockReturnValue(mono + 3_601_000);
     act(() => window.dispatchEvent(new Event('focus')));
     expect(screen.getByText('Signed out')).toBeInTheDocument();
     expect(client.getQueryCache().getAll()).toHaveLength(0);
     expect(screen.getByText('Your session has expired. Please sign in again.')).toBeInTheDocument();
   });
+});
+
+describe('tab session persistence (AST-023)', () => {
+  function mountProbe() {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(<QueryClientProvider client={queryClient}><AuthProvider><Probe /></AuthProvider></QueryClientProvider>);
+    return { queryClient, view };
+  }
+  it('restores a saved session after a reload by re-verifying it with /me', async () => {
+    const saved = token();
+    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: saved, expiresAt: 1, mode: 'driver' }));
+    const fetcher = vi.fn().mockResolvedValueOnce(json(user)).mockResolvedValueOnce(json([]));
+    vi.stubGlobal('fetch', fetcher);
+    mountProbe();
+    expect(await screen.findByText('Ayesha:passenger')).toBeInTheDocument();
+    expect(fetcher.mock.calls[0][0]).toBe('http://localhost:8000/me');
+    expect(fetcher.mock.calls[0][1].headers.Authorization).toBe(`Bearer ${saved}`);
+    // The presentation-only mode survives too, when the verified profile allows it.
+    expect(screen.getByText('Mode: driver')).toBeInTheDocument();
+    await userEvent.click(screen.getByText('Fetch'));
+    expect(fetcher.mock.calls[1][1].headers.Authorization).toBe(`Bearer ${saved}`);
+  });
+  it('a saved token whose expiry hint has passed is still checked with the server; its 401 shows the expiry message', async () => {
+    const expired = `h.${btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 5 }))}.s`;
+    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: expired, receivedAt: Date.now() - 3_700_000, mode: 'passenger' }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ detail: 'Invalid token' }, 401)));
+    mountProbe();
+    expect(await screen.findByText('Your session has expired. Please sign in again.')).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Signed out')).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+  it.each(['not json', '{"token":5}', '[]', 'null'])('drops malformed saved data %s', async raw => {
+    window.sessionStorage.setItem(SESSION_KEY, raw);
+    vi.stubGlobal('fetch', vi.fn());
+    mountProbe();
+    expect(screen.getByText('Signed out')).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+  it('clears the saved session when the server rejects it (401)', async () => {
+    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: token(), expiresAt: 1, mode: null }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ detail: 'Invalid token' }, 401)));
+    mountProbe();
+    expect(await screen.findByText('Your session has ended. Please sign in again.')).toBeInTheDocument();
+    expect(screen.getByText('Signed out')).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+  it('a reload while /me is in flight keeps the saved session (the aborted fetch is not a restore failure)', async () => {
+    const saved = JSON.stringify({ token: token(), expiresAt: 1, mode: 'passenger' });
+    window.sessionStorage.setItem(SESSION_KEY, saved);
+    let fail!: (reason: unknown) => void;
+    vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; })));
+    mountProbe();
+    try {
+      // The browser starts unloading, then aborts the in-flight request.
+      window.dispatchEvent(new Event('pagehide'));
+      await act(async () => { fail(new TypeError('Failed to fetch')); });
+      expect(window.sessionStorage.getItem(SESSION_KEY)).toBe(saved);
+      expect(screen.queryByText(/couldn’t restore your session/)).toBeNull();
+    } finally { resetPageUnloadingForTests(); }
+  });
+  it('a network failure during restore keeps the saved session and shows the retry state (D-RC-2)', async () => {
+    const saved = JSON.stringify({ token: token(), receivedAt: Date.now(), mode: null });
+    window.sessionStorage.setItem(SESSION_KEY, saved);
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch')));
+    mountProbe();
+    expect(await screen.findByText('Restore failed')).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(SESSION_KEY)).toBe(saved);
+    expect(screen.queryByText(/sign in again/)).toBeNull();
+  });
+  it('does not trust a saved profile that fails validation', async () => {
+    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: token(), expiresAt: 1, mode: null }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json({ ...user, role: 'admin' })));
+    mountProbe();
+    await waitFor(() => expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull());
+    expect(screen.getByText('Signed out')).toBeInTheDocument();
+  });
+  it('a protected 401 during a restored session clears the saved token', async () => {
+    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: token(), expiresAt: 1, mode: null }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(json(user)).mockResolvedValueOnce(json({ detail: 'Invalid token' }, 401)));
+    mountProbe();
+    await screen.findByText('Ayesha:passenger');
+    await userEvent.click(screen.getByText('Fetch'));
+    expect(await screen.findByText('Signed out')).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+});
+
+describe('post-login return path', () => {
+  it.each([
+    ['/passenger?ride=7', '/passenger?ride=7'],
+    ['/passenger?view=search&from=Lahore', '/passenger?view=search&from=Lahore'],
+    ['/passenger/search', '/passenger/search'],
+    ['/passenger/search?from=Lahore&page=2', '/passenger/search?from=Lahore&page=2'],
+    ['/passenger/bookings?status=pending', '/passenger/bookings?status=pending'],
+    ['/passenger/rides/7', '/passenger/rides/7'],
+    ['/driver', '/driver'],
+    ['/driver/rides', '/driver/rides'],
+    ['/driver/rides?filter=upcoming', '/driver/rides?filter=upcoming'],
+    ['/driver/rides/new', '/driver/rides/new'],
+    ['/driver/rides/7', '/driver/rides/7'],
+    ['/account', '/account'],
+  ])('accepts in-app path %s', (value, expected) => expect(safeReturnPath(value)).toBe(expected));
+  it.each([undefined, 5, '', 'passenger', '//evil.example.com/passenger', '/\\evil.example.com', 'https://evil.example.com/passenger', 'javascript:alert(1)', '/login', '/passengerx', '/%2F%2Fevil.example.com', '/driverx', '/driver/', '/driver/rides/0', '/driver/rides/7/x', '/driver/admin', '/driver/rides//evil.example.com', '/driver/rides/%2F%2Fevil',
+    '/passenger/', '/passenger/rides', '/passenger/rides/0', '/passenger/rides/7/x', '/passenger/admin', '/passenger/searchx', '/passenger/rides//evil.example.com', '/passenger/rides/%2F%2Fevil', '/passenger/bookings/1'])(
+    'rejects %j', value => expect(safeReturnPath(value)).toBeNull());
 });

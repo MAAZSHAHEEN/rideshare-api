@@ -12,58 +12,93 @@ Use a clean session; these operations are not independently composable transacti
 
 HTTPException intentionally preserves the existing API error contract without
 an additional exception translation layer.
+
+``before_commit`` (book_ride, respond_to_booking): optional coroutine called
+with the flushed booking inside the same transaction, after every guard passed
+and immediately before commit. The idempotency layer uses it to store the
+response with the business write, so both commit or roll back together.
 """
 
+from collections.abc import Awaitable, Callable
+
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Booking, BookingStatus, Ride, RideStatus, User
+import booking_expiry
+import clock
+import lifecycle
+from models import Booking, BookingStatus, Ride, User
 from permissions import allowed_modes
 from schemas import DriverBookingResponse, PassengerBookingResponse, PassengerSummary, RideResponse
+
+BeforeCommit = Callable[[Booking], Awaitable[None]]
 
 
 async def list_my_bookings(
     db: AsyncSession, current_user: User, *,
-    status: BookingStatus | None = None, limit: int = 20, offset: int = 0,
-) -> list[PassengerBookingResponse]:
+    status: BookingStatus | None = None, ride_id: int | None = None,
+    limit: int = 20, offset: int = 0,
+) -> tuple[list[PassengerBookingResponse], int]:
+    """The caller's own bookings (newest first) and the matching total.
+
+    ``ride_id`` narrows to "my bookings for this ride" (G2). It never widens:
+    the passenger_id condition always applies, so another user's ride or
+    booking yields an empty list, not an error that would confirm it exists.
+    """
     if "passenger" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only passengers can list their bookings")
-    query = select(Booking, Ride).join(Ride, Booking.ride_id == Ride.id).where(
-        Booking.passenger_id == current_user.id,
-    )
+    now = clock.utc_now()
+    conditions = [Booking.passenger_id == current_user.id]
     if status is not None:
-        query = query.where(Booking.status == status)
+        conditions.append(booking_expiry.status_filter(status, now))
+    if ride_id is not None:
+        conditions.append(Booking.ride_id == ride_id)
+    query = select(Booking, Ride).join(Ride, Booking.ride_id == Ride.id).where(*conditions)
     rows = await db.execute(query.order_by(Booking.id.desc()).limit(limit).offset(offset))
-    return [PassengerBookingResponse(
+    items = [PassengerBookingResponse(
         id=booking.id, ride_id=booking.ride_id, passenger_id=booking.passenger_id,
-        status=booking.status, ride=RideResponse.model_validate(ride),
+        status=booking_expiry.display_status(booking, ride, now),
+        seats_requested=booking.seats_requested,
+        ride=RideResponse.model_validate(ride),
     ) for booking, ride in rows]
+    # Join Ride: the status filter (#20 lazy expiry) reads Ride.departure_time.
+    total = await db.scalar(select(func.count()).select_from(Booking).join(
+        Ride, Booking.ride_id == Ride.id).where(*conditions))
+    return items, total
 
 
 async def list_ride_bookings(
     ride_id: int, db: AsyncSession, current_user: User, *,
     status: BookingStatus | None = None, limit: int = 20, offset: int = 0,
-) -> list[DriverBookingResponse]:
+) -> tuple[list[DriverBookingResponse], int]:
     if "driver" not in allowed_modes(current_user.role):
         raise HTTPException(status_code=403, detail="Only drivers can list ride bookings")
-    driver_id = await db.scalar(select(Ride.driver_id).where(Ride.id == ride_id))
-    if driver_id is None:
+    ride = (await db.execute(
+        select(Ride.driver_id, Ride.departure_time).where(Ride.id == ride_id))).first()
+    if ride is None:
         raise HTTPException(status_code=404, detail="Ride not found")
+    driver_id = ride.driver_id
     if driver_id != current_user.id:
         raise HTTPException(status_code=403, detail="This is not your ride")
     # Project only the passenger fields allowed in the response; no contact data.
+    now = clock.utc_now()
+    conditions = [Booking.ride_id == ride_id]
+    if status is not None:
+        conditions.append(booking_expiry.status_filter(status, now, ride.departure_time))
     query = select(Booking, User.id, User.name).join(
         User, Booking.passenger_id == User.id,
-    ).where(Booking.ride_id == ride_id)
-    if status is not None:
-        query = query.where(Booking.status == status)
+    ).where(*conditions)
     rows = await db.execute(query.order_by(Booking.id.desc()).limit(limit).offset(offset))
-    return [DriverBookingResponse(
+    items = [DriverBookingResponse(
         id=booking.id, ride_id=booking.ride_id, passenger_id=booking.passenger_id,
-        status=booking.status, passenger=PassengerSummary(id=user_id, name=name),
+        status=booking_expiry.display_status(booking, ride, now),
+        seats_requested=booking.seats_requested,
+        passenger=PassengerSummary(id=user_id, name=name),
     ) for booking, user_id, name in rows]
+    total = await db.scalar(select(func.count()).select_from(Booking).where(*conditions))
+    return items, total
 
 
 async def cancel_booking(
@@ -98,14 +133,15 @@ async def cancel_booking(
             raise HTTPException(status_code=404, detail="Booking not found")
         if booking.passenger_id != current_user.id:
             raise HTTPException(status_code=403, detail="This is not your booking")
-        if ride.status != RideStatus.active:
-            raise HTTPException(status_code=409, detail="Ride is not active")
-        if booking.status not in (BookingStatus.pending, BookingStatus.accepted):
-            raise HTTPException(status_code=409, detail="Booking cannot be cancelled")
+        lifecycle.require_ride_active(ride)
+        lifecycle.booking_target(booking.status, "cancel")
+        # Cancellation cut-off, judged after both locks: an accepted seat on a
+        # departed ride is not handed back. Pending requests stay withdrawable.
+        if (booking.status == BookingStatus.accepted
+                and lifecycle.accepted_cancellation_closed(ride)):
+            raise lifecycle.conflict(lifecycle.RIDE_DEPARTED)
 
-        if booking.status == BookingStatus.accepted:
-            ride.available_seats += 1
-        booking.status = BookingStatus.cancelled
+        lifecycle.apply_booking_transition(ride, booking, "cancel")
         await db.commit()
     except Exception:
         # Rollback also expires ORM state; failed writes must not look persisted.
@@ -120,11 +156,19 @@ async def book_ride(
     ride_id: int,
     db: AsyncSession,
     current_user: User,
+    before_commit: BeforeCommit | None = None,
+    seats: int = 1,
 ) -> Booking:
     try:
         # Passenger capability comes from the authenticated database account
         if "passenger" not in allowed_modes(current_user.role):
             raise HTTPException(status_code=403, detail="Only passengers can book rides")
+        # Before any lock. Defence in depth: the router's schema already bounds ``seats``.
+        if type(seats) is not int or not 1 <= seats <= lifecycle.HARD_MAX_SEATS:
+            raise ValueError("seats out of range")
+        if seats > lifecycle.MAX_SEATS:
+            raise HTTPException(status_code=422,
+                                detail=f"At most {lifecycle.MAX_SEATS} seats per booking")
 
         # Lock the ride row for the duration of this transaction to prevent
         # concurrent requests from double-booking the last seat.
@@ -138,10 +182,18 @@ async def book_ride(
             raise HTTPException(status_code=404, detail="Ride not found")
         if ride.driver_id == current_user.id:
             raise HTTPException(status_code=403, detail="You cannot book your own ride")
-        if ride.status != RideStatus.active:
-            raise HTTPException(status_code=409, detail="Ride is not active")
-        if ride.available_seats < 1:
-            raise HTTPException(status_code=409, detail="No seats available")
+        lifecycle.require_ride_active(ride)
+        # Evaluated after the row lock so a request that waited on a concurrent
+        # transaction is judged against the time it actually proceeds.
+        lifecycle.require_not_departed(ride)
+        # A request does not debit seats (acceptance does), but there is no
+        # point queueing one the ride cannot currently hold. Acceptance
+        # re-checks under the ride lock, since seats may be taken meanwhile.
+        lifecycle.require_seats_available(ride, seats)
+
+        # A passenger's own expired request no longer blocks a new one.
+        now = clock.utc_now()
+        await booking_expiry.expire_own_due_request(db, ride, current_user.id, now)
 
         # Check if passenger already booked this ride
         result = await db.execute(
@@ -157,8 +209,13 @@ async def book_ride(
         booking = Booking(
             ride_id=ride_id,
             passenger_id=current_user.id,
+            expires_at=booking_expiry.pending_expires_at(now, ride.departure_time),
+            seats_requested=seats,
         )
         db.add(booking)
+        if before_commit is not None:
+            await db.flush()  # assigns the id; a unique-index race raises here
+            await before_commit(booking)
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
@@ -184,6 +241,7 @@ async def respond_to_booking(
     accept: bool,
     db: AsyncSession,
     current_user: User,
+    before_commit: BeforeCommit | None = None,
 ) -> Booking:
     try:
         # Driver capability does not depend on a frontend-selected mode
@@ -225,19 +283,23 @@ async def respond_to_booking(
         if booking is None:
             raise HTTPException(status_code=404, detail="Booking not found")
 
-        if booking.status != BookingStatus.pending:
-            raise HTTPException(status_code=409, detail="Booking already responded to")
-
-        if ride.status != RideStatus.active:
-            raise HTTPException(status_code=409, detail="Ride is not active")
+        action = "accept" if accept else "reject"
+        # Guard order is part of the contract: booking state, then ride state.
+        lifecycle.respond_target(booking, ride, action)
+        lifecycle.require_ride_active(ride)
 
         if accept:
-            if ride.available_seats < 1:
-                raise HTTPException(status_code=409, detail="No seats available")
-            booking.status = BookingStatus.accepted
-            ride.available_seats -= 1
-        else:
-            booking.status = BookingStatus.rejected
+            # Rejection stays allowed after departure so drivers can clear
+            # stale requests; acceptance would commit a seat on a departed ride.
+            lifecycle.require_not_departed(ride)
+            # Lazy expiry: never depends on the sweep having run.
+            if booking_expiry.is_expired(booking, ride):
+                raise lifecycle.conflict(lifecycle.BOOKING_EXPIRED)
+        # Debits seats_requested on acceptance; 409 "No seats available" when
+        # none are left, "Not enough seats available" when too few are.
+        lifecycle.apply_booking_transition(ride, booking, action)
+        if before_commit is not None:
+            await before_commit(booking)
 
         await db.commit()
     except Exception:

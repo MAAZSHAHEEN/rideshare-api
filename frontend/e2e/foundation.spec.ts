@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import type { Page } from '@playwright/test';
 
 // Browser contract fixtures only: no accounts are created on a real server.
@@ -21,6 +21,9 @@ async function mockApi(page: Page, role = 'passenger', options: { failMe?: boole
       status = options.failList ? 503 : 200;
       const ride = { id: 7, driver_id: 42, origin: 'Peshawar', destination: 'Islamabad', departure_time: '2030-06-12T09:00:00Z', available_seats: 2, fare_per_seat: 500, status: 'active' };
       body = options.failList ? { detail: 'Database unavailable' } : options.populated ? (path === '/rides/me' ? [ride] : [{ id: 10, passenger_id: 42, ride_id: 7, status: 'pending', ride }]) : [];
+    } else if (path === '/rides/me/booking-counts') {
+      // D2 (PR #17): the driver overview reads request counts for the rides on the page.
+      body = new URL(route.request().url()).searchParams.getAll('ride_id').map(id => ({ ride_id: Number(id), pending: 0, accepted: 0, rejected: 0, cancelled: 0 }));
     } else throw new Error(`Unexpected API request: ${path}`);
     await route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify(body) });
   });
@@ -82,7 +85,7 @@ test('invalid password fails locally; server validation and conflict are accessi
   await expect(page.getByRole('alert')).toBeFocused();
 });
 
-test('passenger identity controls navigation; logout and reload end sessions', async ({ page }, testInfo) => {
+test('passenger identity controls navigation; logout ends the session, reload keeps it (AST-023)', async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto('/passenger');
   await expect(page).toHaveURL('/login');
@@ -98,13 +101,19 @@ test('passenger identity controls navigation; logout and reload end sessions', a
   await page.screenshot({ path: testInfo.outputPath('passenger-desktop.png'), fullPage: true });
   await page.getByRole('link', { name: 'My account', exact: true }).click();
   await expect(page.getByText(identity.email)).toBeVisible();
-  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
+  // AST-023: only the tab-scoped session key; nothing in localStorage, no profile data.
+  expect(await page.evaluate(() => ({ local: localStorage.length, keys: Object.keys(sessionStorage) }))).toEqual({ local: 0, keys: ['rideshare.session.v1'] });
+  expect(await page.evaluate(() => sessionStorage.getItem('rideshare.session.v1'))).not.toContain(identity.email);
   await page.getByRole('main').getByRole('button', { name: 'Log out', exact: true }).click();
+  await expect(page).toHaveURL('/login');
+  expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
+  await page.reload();
   await expect(page).toHaveURL('/login');
   await login(page);
   await expect(page).toHaveURL('/passenger');
   await page.reload();
-  await expect(page).toHaveURL('/login');
+  await expect(page).toHaveURL('/passenger');
+  await expect(page.getByRole('heading', { name: 'Your journey is just beginning.' })).toBeVisible();
 });
 
 test('driver dashboard displays real response shape and is responsive', async ({ page }, testInfo) => {
@@ -202,7 +211,7 @@ for (const role of ['passenger', 'driver']) test(`legacy ${role} switches both d
   expect(authHeaders.length).toBeGreaterThanOrEqual(2);
   expect(new Set(authHeaders).size).toBe(1);
   expect(authHeaders[0]).toMatch(/^Bearer /);
-  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
+  expect(await page.evaluate(() => ({ local: localStorage.length, keys: Object.keys(sessionStorage) }))).toEqual({ local: 0, keys: ['rideshare.session.v1'] });
   await page.screenshot({ path: testInfo.outputPath('dual-mode-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   const passengerLink = page.getByRole('navigation', { name: 'Travel mode' }).getByRole('link', { name: 'Passenger Mode' });

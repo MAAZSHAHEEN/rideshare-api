@@ -76,8 +76,9 @@ and departed rides are excluded; there is no status override.
 
 Optional query parameters:
 
-- `origin`, `destination`: exact, case-sensitive matches; either or both may
-  be omitted. Empty strings are invalid. Whitespace is not trimmed.
+- `origin`, `destination`: whole-value matches, case-insensitive, with
+  surrounding whitespace trimmed on both sides (`lower(btrim(...))`); either or
+  both may be omitted. Empty or blank-after-trimming values return 422.
 - `departure_from`: inclusive lower departure bound.
 - `departure_before`: exclusive upper departure bound. Both time bounds require
   a timezone offset; when supplied together, the lower must precede the upper.
@@ -97,6 +98,24 @@ Revision `b83d12f7a906` adds `ix_rides_status_departure_time_id` on
 Apply it with `alembic upgrade head`. This ordinary transactional index build
 can block writes while it runs; schedule it appropriately for populated databases.
 
+Revision `e3a7c41b9f52` (AST-003) adds foreign-key-led indexes for owner listings
+and booking locks: `ix_rides_driver_id_departure_time_id`,
+`ix_bookings_passenger_id_id` and `ix_bookings_ride_id_id`. They are built with
+`CREATE INDEX CONCURRENTLY` outside a transaction, so writes continue during the
+build. If a build is interrupted, run `alembic downgrade d924a6e38f10` (drops
+them with `IF EXISTS`) and upgrade again. Not yet applied to production.
+
+Email identity is case-insensitive (AST-005). Registration and login trim the
+email and lowercase its ASCII letters; lookups and uniqueness use PostgreSQL
+`lower(email)`, so accounts stored with mixed case before this change still log
+in. Non-ASCII letters are left to PostgreSQL's `lower()` because Python's Unicode
+case mapping can differ from it (for example `İ`). Accounts whose stored email
+has surrounding whitespace (possible only through direct SQL; the API always
+trimmed) cannot log in and need an operator fix by user ID. Revision `f6b2d8e0c413` adds the unique
+index `uq_users_email_lower`. Before creating it, the migration aborts without
+changes if any accounts differ only by case, printing the affected user IDs
+(never addresses) so an operator can resolve them. Not yet applied to production.
+
 `PATCH /rides/{ride_id}/cancel` lets only the owning driver transition an active
 ride to cancelled. It returns the existing ride JSON (200). Missing rides return
 404, completed/already-cancelled rides return 409, and non-owners or admins
@@ -114,6 +133,10 @@ receive new bookings. Concurrent booking actions serialize on the same Ride lock
 `PATCH /rides/{ride_id}/complete` lets only the owning driver transition an active
 ride to completed and returns the existing ride JSON (200). Missing rides return
 404; completed/cancelled rides return 409; non-owners and admins receive 403. There is no reopening or automatic time-based completion.
+A ride can be completed only at or after its scheduled `departure_time`
+(inclusive, judged after the Ride lock with `clock.utc_now()`); earlier requests
+return 409 `{"detail": "Ride cannot be completed before its departure time"}` and
+change nothing.
 
 Completion locks and refreshes the Ride, then locks pending bookings in ID order.
 Pending requests become cancelled, while accepted/rejected/cancelled history is
@@ -125,6 +148,13 @@ serialize on the Ride lock, so exactly one terminal ride transition can win.
 ### Bookings
 - POST /bookings/{ride_id} — book a ride (passenger capability, ordinary accounts)
 - PATCH /bookings/{booking_id}/respond — accept or reject booking (driver capability, ordinary accounts)
+
+Departure rule: once a ride's `departure_time` is at or before the current UTC
+time, booking it and accepting a pending request both return 409
+(`Ride has already departed`). Rejecting a pending request stays allowed so
+drivers can clear stale requests. The check runs after the Ride row lock, so a
+request that waited on a concurrent transaction is judged at the time it
+proceeds. Time comes from `clock.utc_now()`.
 
 `PATCH /bookings/{booking_id}/cancel` lets only the owning passenger cancel a
 pending or accepted booking on an active ride. It returns the existing booking
@@ -141,7 +171,13 @@ Passenger cancellation on completed/cancelled rides returns 409. In particular,
 accepted bookings on completed rides cannot be cancelled or restore seats. If
 passenger cancellation wins the Ride lock before completion, its cancellation
 and any valid seat restoration persist; completion may then also succeed.
-No departure-time cutoff is imposed by this endpoint.
+Cancellation cut-off: an *accepted* booking can no longer be cancelled once
+the ride's `departure_time` is at or before the current UTC time; the endpoint
+returns 409 (`Ride has already departed`) and the seat is not restored. A
+*pending* request can still be withdrawn after departure. The check runs after
+both row locks, using `clock.utc_now()`. Driver ride cancellation has no
+cut-off. All ride/booking transitions are defined in `lifecycle.py`; see
+`docs/architecture/BOOKING_LIFECYCLE.md` for the full state tables and races.
 
 API errors use FastAPI's existing `{"detail": ...}` response. Authentication
 failures return 401 with `WWW-Authenticate: Bearer`; login uses the same generic
@@ -168,9 +204,13 @@ All endpoints below require a bearer token. `GET /me` returns the typed
   response, including departed, sold-out, completed and cancelled rides. Missing
   rides return 404.
 - `GET /rides/me`: ordinary accounts in their driver capacity; returns only their own rides, with optional
-  `status=active|completed|cancelled`, ordered by departure time DESC, id DESC.
+  `status=active|completed|cancelled`, `departure_from`/`departure_before` (aware, `[from, before)`),
+  `when=upcoming|departed` (`departure_time > now` / `<= now`) and `order=desc|asc`
+  (default departure time DESC, id DESC).
+- `GET /rides/me/booking-counts?ride_id=…` (1–100 ids): booking counts by status for the caller's own
+  rides; other drivers' or unknown rides are omitted.
 - `GET /bookings/me`: ordinary accounts in their passenger capacity; returns only their bookings, each with
-  a nested `ride` containing the existing ride response fields.
+  a nested `ride` containing the existing ride response fields. Optional `ride_id` narrows to that ride.
 - `GET /rides/{ride_id}/bookings`: owning driver only; each booking includes
   `passenger: {id, name}`. No passenger email, CNIC, phone or password is returned.
   Non-owners/admin accounts receive 403; an eligible account lookup of a missing
@@ -181,6 +221,9 @@ Both booking lists order by booking id DESC and accept optional
 by default and return plain lists with `limit` (default 20, range 1–100) and
 `offset` (default 0, range 0–9223372036854775807). Filters apply before pagination;
 invalid values return 422. These reads do not change lifecycle rules or seats.
+Every list (`GET /rides/`, `/rides/me`, `/bookings/me`, `/rides/{id}/bookings`) sends
+`X-Total-Count`: the number of rows matching the filters, ignoring `limit`/`offset`
+(exposed over CORS together with `Retry-After`). See docs/api/API_GAPS_CLOSED.md.
 
 Set `FRONTEND_ORIGINS` to a comma-separated list of exact HTTP(S) frontend origins,
 for example `http://localhost:5173,http://127.0.0.1:5173` in development. Configure

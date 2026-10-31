@@ -7,6 +7,7 @@ them. Teardown drops only that schema. App lifespan and migrations are not run.
 """
 
 import asyncio
+import contextvars
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,14 @@ with patch.dict(os.environ, {
     from models import Booking, BookingStatus, Ride, RideStatus, User, UserRole
     from routers.auth import create_access_token
 
+# Per-operation clock override. Completion is only allowed at or after departure
+# (AST-016) while booking and acceptance are only allowed before it, so the race
+# tests run each completion "after departure" and every other operation at the
+# frozen "before departure" instant (self.now). Each asyncio task has its own
+# context copy, so an override set inside one queued request never leaks into
+# another. Outcomes match a real monotonic clock: a request serialized after a
+# completion fails the ride-status guard, which runs before any time guard.
+_OPERATION_NOW = contextvars.ContextVar("operation_now", default=None)
 
 @unittest.skipUnless(TEST_DATABASE_URL, "Set TEST_DATABASE_URL to a PostgreSQL test database")
 class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
@@ -53,6 +62,14 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             await connection.run_sync(Base.metadata.create_all)
         self.addAsyncCleanup(self.drop_schema)
 
+        # Frozen clock: every service reads clock.utc_now (see _OPERATION_NOW).
+        self.now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.departure = self.now + timedelta(days=1)
+        self.after_departure = self.departure + timedelta(minutes=5)
+        frozen = patch("clock.utc_now", side_effect=lambda: _OPERATION_NOW.get() or self.now)
+        frozen.start()
+        self.addCleanup(frozen.stop)
+
         async with AsyncSession(self.engine, expire_on_commit=False) as session:
             users = [User(
                 name=f"User {index}", email=f"user{index}@example.com",
@@ -67,7 +84,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             self.driver, self.other_driver, self.passenger, self.other_passenger, self.admin = users
             ride = Ride(
                 driver_id=self.driver.id, origin="Peshawar", destination="Islamabad",
-                departure_time=datetime.now(timezone.utc) + timedelta(days=1),
+                departure_time=self.departure,
                 available_seats=2, fare_per_seat=500,
             )
             session.add(ride)
@@ -147,13 +164,19 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             f"/bookings/{self.ride_id}", headers={"Authorization": f"Bearer {token}"},
         )
 
-    async def complete_ride_request(self, ride_id=None, user=None):
+    async def complete_ride_request(self, ride_id=None, user=None, at="after_departure"):
+        """Complete the ride as of ``at``: a datetime, the default five minutes
+        after departure, or None to read the shared test clock (``self.now``)."""
         user = user or self.driver
         token = create_access_token(user.id, user.role)
-        return await self.client.patch(
-            f"/rides/{ride_id if ride_id is not None else self.ride_id}/complete",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        override = _OPERATION_NOW.set(self.after_departure if at == "after_departure" else at)
+        try:
+            return await self.client.patch(
+                f"/rides/{ride_id if ride_id is not None else self.ride_id}/complete",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        finally:
+            _OPERATION_NOW.reset(override)
 
     async def assert_completed_ride(self, expected_seats=2):
         async with AsyncSession(self.engine) as session:
@@ -498,6 +521,8 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json(), {
             "id": self.booking_ids[0], "ride_id": self.ride_id,
             "passenger_id": self.passenger.id, "status": "cancelled",
+            # Additive field from c1a7e0b00003 (deliberate contract update).
+            "seats_requested": 1,
         })
         self.assertEqual(await self.state(), (2, [BookingStatus.cancelled, BookingStatus.pending]))
 
@@ -696,7 +721,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         # A separate ride demonstrates scope: the original ride and its bookings survive.
         async with AsyncSession(self.engine, expire_on_commit=False) as session:
             empty = Ride(driver_id=self.driver.id, origin="A", destination="B",
-                         departure_time=datetime.now(timezone.utc) + timedelta(days=1),
+                         departure_time=self.departure,
                          available_seats=7, fare_per_seat=0)
             session.add(empty)
             await session.commit()
@@ -916,7 +941,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         original_id = self.ride_id
         async with AsyncSession(self.engine, expire_on_commit=False) as session:
             empty = Ride(driver_id=self.driver.id, origin="A", destination="B",
-                         departure_time=datetime.now(timezone.utc) + timedelta(days=1),
+                         departure_time=self.departure,
                          available_seats=7, fare_per_seat=0)
             session.add(empty)
             await session.commit()
@@ -1070,6 +1095,87 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(responses[1].json()["detail"], "Ride is not active")
         self.assertEqual((await self.state())[1], [BookingStatus.accepted, BookingStatus.cancelled])
         await self.assert_completed_ride(expected_seats=1)
+
+    # --- AST-016: completion only at or after the scheduled departure ----------
+
+    async def assert_untouched_active_ride(self, before):
+        self.assertEqual(await self.state(), before)
+        async with AsyncSession(self.engine) as session:
+            self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
+
+    async def test_completion_before_departure_is_refused_without_side_effects(self):
+        self.assertEqual((await self.respond(self.booking_ids[0], True)).status_code, 200)
+        before = await self.state()
+        for label, at in (("a day early", self.now),
+                          ("one second early", self.departure - timedelta(seconds=1)),
+                          ("one microsecond early", self.departure - timedelta(microseconds=1))):
+            with self.subTest(at=label):
+                response = await self.complete_ride_request(at=at)
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json(), {
+                    "detail": "Ride cannot be completed before its departure time"})
+                await self.assert_untouched_active_ride(before)
+
+    async def test_completion_at_exact_departure_instant_is_allowed(self):
+        early = await self.complete_ride_request(at=self.departure - timedelta(microseconds=1))
+        self.assertEqual(early.status_code, 409, early.text)
+        response = await self.complete_ride_request(at=self.departure)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "completed")
+        await self.assert_completed_ride()
+
+    async def test_completion_boundary_compares_instants_across_time_zones(self):
+        pkt = timezone(timedelta(hours=5))
+        early = await self.complete_ride_request(
+            at=(self.departure - timedelta(microseconds=1)).astimezone(pkt))
+        self.assertEqual(early.status_code, 409, early.text)
+        response = await self.complete_ride_request(at=self.departure.astimezone(pkt))
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_terminal_ride_reports_not_active_before_departure(self):
+        # Guard order: status before time, so a finished ride never claims it
+        # merely "has not departed yet".
+        for status in (RideStatus.completed, RideStatus.cancelled):
+            with self.subTest(status=status.value):
+                await self.update_ride(status=status)
+                response = await self.complete_ride_request(at=self.now)
+                self.assertEqual((response.status_code, response.json()),
+                                 (409, {"detail": "Ride is not active"}))
+
+    async def test_authorization_and_lookup_are_checked_before_departure_rule(self):
+        for user in (self.other_driver, self.passenger, self.admin):
+            with self.subTest(role=user.role.value):
+                response = await self.complete_ride_request(user=user, at=self.now)
+                self.assertEqual(response.status_code, 403, response.text)
+        response = await self.complete_ride_request(ride_id=self.ride_id + 1, at=self.now)
+        self.assertEqual(response.status_code, 404, response.text)
+
+    async def test_completion_waiting_on_ride_lock_is_judged_when_it_proceeds(self):
+        # The departure check runs after the Ride lock: a request queued one
+        # microsecond early but released at departure is allowed.
+        self.now = self.departure - timedelta(microseconds=1)
+
+        async def depart(_coordinator):
+            self.now = self.departure
+
+        responses = await self.contended_operations(
+            [lambda: self.complete_ride_request(at=None)], depart)
+        self.assertEqual(responses[0].status_code, 200, responses[0].text)
+        await self.assert_completed_ride()
+
+    async def test_completion_waiting_on_ride_lock_rechecks_against_its_own_time(self):
+        # Mirror image: queued at departure but judged one microsecond early
+        # (clock stepped back while waiting) is refused; nothing changes.
+        before = await self.state()
+        self.now = self.departure
+
+        async def step_back(_coordinator):
+            self.now = self.departure - timedelta(microseconds=1)
+
+        responses = await self.contended_operations(
+            [lambda: self.complete_ride_request(at=None)], step_back)
+        self.assertEqual(responses[0].status_code, 409, responses[0].text)
+        await self.assert_untouched_active_ride(before)
 
     async def test_completion_refreshes_driver_ownership_after_lock_wait(self):
         self.preload_state = True

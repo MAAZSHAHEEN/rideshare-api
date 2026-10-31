@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { passwordError, tokenExpiry } from './validation';
+import { passwordError, tokenTiming } from './validation';
 
 describe('backend password policy', () => {
   it('requires 12 characters for registration but accepts legacy login passwords', () => {
@@ -22,10 +22,16 @@ describe('backend password policy', () => {
   });
 });
 
-describe('expiry hints', () => {
-  it('accepts future integer expiry, rejecting malformed and expired tokens', () => {
+describe('expiry hints (D-RC-1: server-issued lifetime, not the device clock)', () => {
+  const tok = (claims: unknown) => `h.${btoa(JSON.stringify(claims))}.s`;
+  it('returns exp and the server lifetime exp − iat without looking at the device clock', () => {
+    // A token issued long ago on the server clock still yields its lifetime: the device clock is irrelevant.
+    expect(tokenTiming(tok({ iat: 1_000, exp: 4_600 }))).toEqual({ expMs: 4_600_000, lifetimeMs: 3_600_000 });
     const exp = Math.floor(Date.now() / 1000) + 600;
-    expect(tokenExpiry(`h.${btoa(JSON.stringify({ exp }))}.s`)).toBe(exp * 1000);
-    for (const token of ['bad', 'h.@@@.s', `h.${btoa('{"exp":1}')}.s`, `h.${btoa('{"exp":"9999999999"}')}.s`]) expect(() => tokenExpiry(token)).toThrow();
+    expect(tokenTiming(tok({ exp }))).toEqual({ expMs: exp * 1000, lifetimeMs: null });
+  });
+  it('rejects malformed claims', () => {
+    for (const token of ['bad', 'h.@@@.s', tok({}), tok({ exp: '9999999999' }), tok({ exp: 1.5 }), tok({ exp: 0 }), tok({ exp: 100, iat: 100 }), tok({ exp: 100, iat: 200 }), tok({ exp: 100, iat: '1' }), tok(null), tok([1])])
+      expect(() => tokenTiming(token), token).toThrow('The sign-in session is invalid or expired. Please sign in again.');
   });
 });

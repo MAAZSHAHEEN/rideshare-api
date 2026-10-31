@@ -5,6 +5,7 @@ isolated schema. No dependency override or production database is used.
 """
 import asyncio
 import os
+from contextlib import nullcontext
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -108,7 +109,13 @@ class TransactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             return await rides.create_ride(RideCreate(**self.payload()), db, self.driver)
         if operation == "cancel_ride":
             return await rides.cancel_ride(ride_id, db, self.driver)
-        return await rides.complete_ride(ride_id, db, self.driver)
+        # AST-016: completion is only possible after departure (rides depart in a day).
+        with self.after_departure():
+            return await rides.complete_ride(ride_id, db, self.driver)
+
+    @staticmethod
+    def after_departure():
+        return patch("clock.utc_now", return_value=datetime.now(timezone.utc) + timedelta(days=2))
 
     async def test_direct_conflicts_release_locks_before_session_closes(self):
         for operation in ("book", "respond", "cancel_booking", "cancel_ride", "complete"):
@@ -280,7 +287,8 @@ class TransactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 elif operation == "register":
                     method, path, kwargs = "post", "/auth/register", {"json": self.registration()}
                 kwargs["headers"] = {"Authorization": f"Bearer {create_access_token(actor.id, actor.role)}"}
-                with patch.object(AsyncSession, "refresh", fail_refresh), patch.object(AsyncSession, "rollback", record_rollback):
+                clock = self.after_departure() if operation == "complete" else nullcontext()
+                with patch.object(AsyncSession, "refresh", fail_refresh), patch.object(AsyncSession, "rollback", record_rollback), clock:
                     with self.assertRaisesRegex(RuntimeError, "refresh failed"):
                         await getattr(self.client, method)(path, **kwargs)
                 self.assertEqual(len(observed), 1)
