@@ -48,6 +48,9 @@ with patch.dict(os.environ, {
 FAKE_CNIC = "99999-9999999-1"
 FAKE_CNIC_DIGITS = "9999999999991"
 FAKE_PHONE = "03009999991"
+# Subscriber digits shared by the raw input and the +92 form AST-007 stores, so the
+# positive control and the leak check hold whether or not the phone is normalised.
+FAKE_PHONE_DIGITS = "3009999991"
 FAKE_PASSWORD = "Fake-password-marker-0001!"
 FAKE_TOKEN = "fake.jwt.token-not-real-0001"
 FAKE_DSN = "postgresql://rideshare:fake-dsn-password-0001@db.internal/rideshare"
@@ -349,8 +352,8 @@ class RealIntegrityErrorTests(LogCaptureMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual((record["exc_type"], record["sqlstate"], record["constraint"], record["route"]),
                          ("sqlalchemy.exc.IntegrityError", "23505", "uq_test_users_phone", "/auth/register"))
         self.assertEqual(record["db_error"], "UniqueViolationError")
-        self.assertIn(FAKE_PHONE, self.raw_exception_text[0])  # The trap was real.
-        self.assert_no_markers(logs.text + response.text, [FAKE_PHONE, FAKE_PASSWORD, "DETAIL", "Key (", "$2b$"])
+        self.assertIn(FAKE_PHONE_DIGITS, self.raw_exception_text[0])  # The trap was real.
+        self.assert_no_markers(logs.text + response.text, [FAKE_PHONE_DIGITS, FAKE_PASSWORD, "DETAIL", "Key (", "$2b$"])
 
     async def test_unmapped_check_violation_failing_row_with_cnic_and_hash(self):
         logs = self.capture_logs()
@@ -361,10 +364,10 @@ class RealIntegrityErrorTests(LogCaptureMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual((record["sqlstate"], record["constraint"], record["db_error"]),
                          ("23514", "ck_test_users_cnic", "CheckViolationError"))
         raw = self.raw_exception_text[0]
-        for marker in (FAKE_CNIC_DIGITS, FAKE_PHONE, "$2b$", "Failing row"):
+        for marker in (FAKE_CNIC_DIGITS, FAKE_PHONE_DIGITS, "$2b$", "Failing row"):
             self.assertIn(marker, raw)  # The trap was real.
         self.assert_no_markers(logs.text + response.text,
-                               [FAKE_CNIC_DIGITS, FAKE_PHONE, FAKE_PASSWORD, payload["email"], "$2b$",
+                               [FAKE_CNIC_DIGITS, FAKE_PHONE_DIGITS, FAKE_PASSWORD, payload["email"], "$2b$",
                                 "Failing row", "DETAIL"])
 
     async def assert_commit_time_conflict(self, column, constraint):
