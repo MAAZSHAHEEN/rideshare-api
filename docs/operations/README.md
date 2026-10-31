@@ -20,3 +20,5 @@ as approval-gated need the repository owner's explicit go-ahead.
 
 Related: `docs/security/DEPENDENCY_AUDIT_2026-10-31.md` (PR #10, dependency report),
 `docs/privacy/CNIC_PHONE_PROTECTION.md` (PR #8), `DEPLOYMENT.md` (build and deploy path).
+
+Release-candidate review (31 Oct 2026): [docs/release](../release/README.md) — security review, background jobs, launch blockers.
