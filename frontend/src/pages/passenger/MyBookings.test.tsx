@@ -15,7 +15,7 @@ const list = () => [
 
 describe('my bookings', () => {
   it('groups by status in a fixed order and labels departed rides', async () => {
-    renderPassenger('/passenger?view=bookings', { 'GET /bookings/me': () => json(list()) });
+    renderPassenger('/passenger/bookings', { 'GET /bookings/me': () => json(list()) });
     const groups = await screen.findAllByRole('heading', { level: 3 });
     expect(groups.map(g => g.textContent)).toEqual(['Pending (2)', 'Accepted (1)', 'Rejected (1)', 'Cancelled (1)']);
     const departed = screen.getByRole('article', { name: 'Multan to Lahore' });
@@ -33,7 +33,7 @@ describe('my bookings', () => {
 
   it('confirms before cancelling, then shows the booking as cancelled', async () => {
     let bookings = list();
-    const harness = renderPassenger('/passenger?view=bookings', {
+    const harness = renderPassenger('/passenger/bookings', {
       'GET /bookings/me': () => json(bookings),
       'PATCH /bookings/1/cancel': () => { bookings = bookings.map(b => b.id === 1 ? { ...b, status: 'cancelled' } : b); return json({ id: 1, ride_id: 1, passenger_id: 42, status: 'cancelled' }); },
     });
@@ -57,7 +57,7 @@ describe('my bookings', () => {
   });
 
   it('keeps the dialog open with a friendly message when cancellation conflicts', async () => {
-    renderPassenger('/passenger?view=bookings', {
+    renderPassenger('/passenger/bookings', {
       'GET /bookings/me': () => json(list()),
       'PATCH /bookings/2/cancel': () => json({ detail: 'Booking cannot be cancelled' }, 409),
     });
@@ -68,7 +68,7 @@ describe('my bookings', () => {
   });
 
   it('filters by status with the server-side status parameter', async () => {
-    const harness = renderPassenger('/passenger?view=bookings', { 'GET /bookings/me': url => json(url.searchParams.get('status') === 'accepted' ? [list()[1]] : list()) });
+    const harness = renderPassenger('/passenger/bookings', { 'GET /bookings/me': url => json(url.searchParams.get('status') === 'accepted' ? [list()[1]] : list()) });
     await screen.findAllByRole('article');
     await userEvent.click(screen.getByRole('button', { name: 'Accepted' }));
     await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(1));
@@ -79,12 +79,12 @@ describe('my bookings', () => {
   });
 
   it('has empty and error states', async () => {
-    renderPassenger('/passenger?view=bookings', { 'GET /bookings/me': () => json([]) });
+    renderPassenger('/passenger/bookings', { 'GET /bookings/me': () => json([]) });
     expect(await screen.findByRole('heading', { name: 'No bookings yet.' })).toBeInTheDocument();
-    expect(within(screen.getByRole('region', { name: 'All bookings' })).getByRole('link', { name: 'Find a ride' })).toHaveAttribute('href', '/passenger?view=search');
+    expect(within(screen.getByRole('region', { name: 'All bookings' })).getByRole('link', { name: 'Find a ride' })).toHaveAttribute('href', '/passenger/search');
   });
   it('shows a load error with retry', async () => {
-    renderPassenger('/passenger?view=bookings', { 'GET /bookings/me': () => json({ detail: 'x' }, 500) });
+    renderPassenger('/passenger/bookings', { 'GET /bookings/me': () => json({ detail: 'x' }, 500) });
     expect(await screen.findByText('We couldn’t load your bookings.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });

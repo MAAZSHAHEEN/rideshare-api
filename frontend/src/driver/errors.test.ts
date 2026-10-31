@@ -8,10 +8,28 @@ describe('driver error copy', () => {
   it('maps each known respond conflict to specific copy', () => {
     expect(driverErrorMessage(conflict('Ride has already departed'), 'accept')).toMatch(/already departed/);
     expect(driverErrorMessage(conflict('No seats available'), 'accept')).toMatch(/No seats are left/);
-    expect(driverErrorMessage(conflict('Booking already responded to'), 'accept')).toMatch(/already answered, or the passenger withdrew/);
+    expect(driverErrorMessage(conflict('Booking already responded to'), 'accept')).toBe('This request was already answered. The list has been refreshed with its current status.');
     expect(driverErrorMessage(conflict('Booking already responded to'), 'reject')).toMatch(/already answered/);
     expect(driverErrorMessage(conflict('Ride is not active'), 'accept')).toMatch(/no longer active/);
     expect(driverErrorMessage(conflict('Ride is not active'), 'cancel-ride')).toMatch(/already cancelled or completed/);
+  });
+  it('D7: a request withdrawn by the passenger gets its own copy on accept and reject', () => {
+    for (const action of ['accept', 'reject'] as const) {
+      const message = driverErrorMessage(conflict('Booking was cancelled by the passenger'), action);
+      expect(message).toBe('The passenger withdrew this request, so it can’t be answered. The list has been refreshed.');
+      expect(driverErrorMessage(conflict('Booking already responded to'), action)).not.toMatch(/withdrew/);
+    }
+    // Not a ride-level conflict: cancel/complete keep the generic copy.
+    expect(driverErrorMessage(conflict('Booking was cancelled by the passenger'), 'cancel-ride')).toMatch(/changed at the same time/);
+  });
+  it('AST-016: early completion has specific copy; it is not mapped for other actions', () => {
+    expect(driverErrorMessage(conflict('Ride cannot be completed before its departure time'), 'complete-ride')).toBe('This ride can be marked completed only after its departure time.');
+    expect(driverErrorMessage(conflict('Ride cannot be completed before its departure time'), 'accept')).toMatch(/changed at the same time/);
+  });
+  it('near-miss server strings are not matched (exact keys only)', () => {
+    for (const detail of ['booking was cancelled by the passenger', 'Booking was cancelled by the passenger.', ' Booking was cancelled by the passenger']) {
+      expect(driverErrorMessage(conflict(detail), 'accept')).toMatch(/changed at the same time/);
+    }
   });
   it('treats unknown conflicts as a concurrent change and never echoes the server text', () => {
     const message = driverErrorMessage(conflict('could not serialize access due to concurrent update'), 'accept');

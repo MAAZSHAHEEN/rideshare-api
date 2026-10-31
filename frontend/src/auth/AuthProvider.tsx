@@ -149,8 +149,9 @@ export function dashboardPath(user: User, mode?: AccountMode | null) {
   return user.role === 'admin' || !selected ? '/account' : `/${selected}`;
 }
 
-// Driver sub-routes are listed exactly (M3); nothing else under /driver/ is a return target.
-const RETURNABLE = /^\/(?:passenger|account|driver(?:\/rides(?:\/(?:new|[1-9]\d{0,9}))?)?)(?:$|[?#])/;
+// Passenger and driver sub-routes are listed exactly; nothing else under /passenger/ or /driver/ is a return target.
+// (`/passenger?view=…` / `?ride=…` stay returnable: the passenger area redirects them to the path routes.)
+const RETURNABLE = /^\/(?:passenger(?:\/(?:search|bookings|rides\/[1-9]\d{0,9}))?|account|driver(?:\/rides(?:\/(?:new|[1-9]\d{0,9}))?)?)(?:$|[?#])/;
 /**
  * A same-origin path to return to after signing in, or null. Only in-app
  * dashboard paths qualify; protocol-relative, absolute and backslash tricks

@@ -26,7 +26,12 @@ export function App() {
     <Route index element={<Landing />} />
     <Route path="login" element={<AuthPage key="login" mode="login" />} />
     <Route path="register" element={<AuthPage key="register" mode="register" />} />
-    <Route element={<Protected role="passenger" />}><Route path="passenger" element={<PassengerArea />} /></Route>
+    <Route element={<Protected role="passenger" />}>
+      <Route path="passenger" element={<PassengerArea view="overview" />} />
+      <Route path="passenger/search" element={<PassengerArea view="search" />} />
+      <Route path="passenger/bookings" element={<PassengerArea view="bookings" />} />
+      <Route path="passenger/rides/:rideId" element={<PassengerArea view="ride" />} />
+    </Route>
     <Route element={<Protected role="driver" />}>
       <Route path="driver" element={<Dashboard key="driver" mode="driver" />} />
       <Route path="driver/rides" element={<DriverArea view="rides" />} />

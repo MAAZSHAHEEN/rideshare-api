@@ -4,7 +4,10 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { dashboardPath, useAuth } from '../auth/AuthProvider';
 import { Icon } from '../components/Icon';
-import type { AccountMode, Ride } from '../api/types';
+import { hasNextPage } from '../api/client';
+import type { AccountMode, Ride, RideBookingCounts } from '../api/types';
+import { useRideBookingCounts } from '../driver/useRideBookingCounts';
+import { pendingLabel } from '../driver/state';
 import { formatDeparture } from '../passenger/time';
 
 export function Dashboard({ mode }: { mode: AccountMode }) {
@@ -14,17 +17,25 @@ export function Dashboard({ mode }: { mode: AccountMode }) {
   const driver = mode === 'driver';
   const query = useQuery({
     queryKey: [driver ? 'my-rides' : 'my-bookings', user!.id, offset],
-    queryFn: async ({ signal }) => driver
-      ? (await api.myRides(offset, signal)).map(ride => ({ id: ride.id, ride, status: ride.status }))
-      : (await api.myBookings(offset, signal)).map(booking => ({ id: booking.id, ride: booking.ride, status: booking.status })),
+    queryFn: async ({ signal }) => {
+      if (driver) {
+        const page = await api.myRidesPage(offset, signal);
+        return { total: page.total, rows: page.items.map(ride => ({ id: ride.id, ride, status: ride.status })) };
+      }
+      const page = await api.myBookingsPage(offset, signal);
+      return { total: page.total, rows: page.items.map(booking => ({ id: booking.id, ride: booking.ride, status: booking.status })) };
+    },
   });
-  const rows = query.data ?? [];
+  const rows = query.data?.rows ?? [];
+  const total = query.data?.total ?? null;
+  // D2: one counts call per page of the driver's rides (pending badge).
+  const counts = useRideBookingCounts(driver ? rows.map(row => row.ride.id) : []);
   return <DashboardShell mode={mode} active="overview">
 <div className="dashboard-heading"><div><span className="eyebrow">{driver ? 'IN THE DRIVER’S SEAT' : 'YOUR JOURNEY, YOUR SPACE'}</span><h1>Welcome, {user!.name.split(' ')[0] || 'traveller'}.</h1><p>{driver ? 'Your rides. Your plans. All in one place.' : 'A little less planning. A little more looking forward.'}</p></div><span className="account-badge"><span className="little-dot" />{driver ? 'Driver Mode' : 'Passenger Mode'}</span></div>
-      <div className="dashboard-banner"><div><span className="eyebrow">{driver ? 'MAKE ROOM FOR POSSIBILITY' : 'GOOD THINGS ARE AHEAD'}</span><h2>{driver ? 'Every shared seat\nis a new connection.' : 'Your next chapter\nstarts with a journey.'}</h2><p>{driver ? 'Publish a scheduled intercity ride and answer seat requests.' : 'Keep an eye on the journeys you’ve requested.'}</p>{driver ? <Link className="button small banner-cta" to="/driver/rides/new">Publish a ride <Icon name="arrow" size={16} /></Link> : <Link className="button small banner-cta" to="/passenger?view=search">Find a ride <Icon name="arrow" size={16} /></Link>}</div><img src="/journey.svg" alt="" /></div>
+      <div className="dashboard-banner"><div><span className="eyebrow">{driver ? 'MAKE ROOM FOR POSSIBILITY' : 'GOOD THINGS ARE AHEAD'}</span><h2>{driver ? 'Every shared seat\nis a new connection.' : 'Your next chapter\nstarts with a journey.'}</h2><p>{driver ? 'Publish a scheduled intercity ride and answer seat requests.' : 'Keep an eye on the journeys you’ve requested.'}</p>{driver ? <Link className="button small banner-cta" to="/driver/rides/new">Publish a ride <Icon name="arrow" size={16} /></Link> : <Link className="button small banner-cta" to="/passenger/search">Find a ride <Icon name="arrow" size={16} /></Link>}</div><img src="/journey.svg" alt="" /></div>
       <section className="history-panel" id="history"><div className="history-heading"><div><h2>{driver ? 'My rides' : 'My bookings'}</h2><p>Current plans and past journeys, together.</p></div><button className="button button-outline small" onClick={() => void query.refetch()} disabled={query.isFetching}>{query.isFetching ? 'Refreshing…' : 'Refresh'}</button></div>
-        {query.isPending ? <div className="state-panel" role="status"><span className="spinner blue" /><p>Loading your journeys…</p></div> : query.isError ? <div className="state-panel"><span className="icon-tile"><Icon name="road" /></span><h3>We couldn’t load your journeys.</h3><p role="alert">{query.error.message}</p><button className="button small" onClick={() => void query.refetch()}>Try again</button></div> : rows.length === 0 ? <div className="state-panel"><span className="empty-illustration"><Icon name={driver ? 'car' : 'bag'} size={34} /></span><h3>{offset ? 'You’ve reached the end.' : driver ? 'Your road ahead is open.' : 'Your journey is just beginning.'}</h3><p>{offset ? 'Go back to see your earlier results.' : driver ? 'When you create a ride, it will appear here.' : 'When you request a booking, you’ll find it here.'}</p><span className="state-footnote">{!offset && 'A little company. A better journey.'}</span></div> : <div className="journey-list">{rows.map(row => <JourneyRow key={row.id} ride={row.ride} status={row.status} driver={driver} />)}</div>}
-        <div className="pagination"><span>Page {offset / 20 + 1}{!query.isPending && !query.isError ? ` · ${rows.length} ${driver ? 'ride' : 'booking'}${rows.length === 1 ? '' : 's'} shown` : ''}</span><div><button disabled={offset === 0 || query.isFetching} onClick={() => setOffset(Math.max(0, offset - 20))}>← Previous</button><button disabled={rows.length < 20 || query.isFetching || query.isError} onClick={() => setOffset(offset + 20)}>Next →</button></div></div>
+        {query.isPending ? <div className="state-panel" role="status"><span className="spinner blue" /><p>Loading your journeys…</p></div> : query.isError ? <div className="state-panel"><span className="icon-tile"><Icon name="road" /></span><h3>We couldn’t load your journeys.</h3><p role="alert">{query.error.message}</p><button className="button small" onClick={() => void query.refetch()}>Try again</button></div> : rows.length === 0 ? <div className="state-panel"><span className="empty-illustration"><Icon name={driver ? 'car' : 'bag'} size={34} /></span><h3>{offset ? 'You’ve reached the end.' : driver ? 'Your road ahead is open.' : 'Your journey is just beginning.'}</h3><p>{offset ? 'Go back to see your earlier results.' : driver ? 'When you create a ride, it will appear here.' : 'When you request a booking, you’ll find it here.'}</p><span className="state-footnote">{!offset && 'A little company. A better journey.'}</span></div> : <div className="journey-list">{rows.map(row => <JourneyRow key={row.id} ride={row.ride} status={row.status} driver={driver} counts={driver ? counts.data?.get(row.ride.id) : undefined} />)}</div>}
+        <div className="pagination"><span>Page {offset / 20 + 1}{!query.isPending && !query.isError ? ` · ${rows.length} ${driver ? 'ride' : 'booking'}${rows.length === 1 ? '' : 's'} shown${total !== null ? ` of ${total}` : ''}` : ''}</span><div><button disabled={offset === 0 || query.isFetching} onClick={() => setOffset(Math.max(0, offset - 20))}>← Previous</button><button disabled={!hasNextPage(offset, rows.length, 20, total) || query.isFetching || query.isError} onClick={() => setOffset(offset + 20)}>Next →</button></div></div>
       </section>
   </DashboardShell>;
 }
@@ -32,8 +43,8 @@ export function Dashboard({ mode }: { mode: AccountMode }) {
 export type DashboardSection = 'overview' | 'search' | 'bookings' | 'publish' | 'rides';
 
 /**
- * Shared dashboard frame. Passenger sections use query views (built before the
- * /passenger/* deep-link fix, G1); driver sections use paths under /driver/.
+ * Shared dashboard frame. Passenger and driver sections are paths under
+ * /passenger/ and /driver/ (deep links served by the backend, G1).
  */
 export function DashboardShell({ mode, active, children }: { mode: AccountMode; active: DashboardSection; children: ReactNode }) {
   const { user, logout } = useAuth();
@@ -46,8 +57,8 @@ export function DashboardShell({ mode, active, children }: { mode: AccountMode; 
         <Link {...current('publish')} to="/driver/rides/new"><Icon name="car" size={19} />Publish a ride</Link>
         <Link {...current('rides')} to="/driver/rides"><Icon name="road" size={19} />My rides</Link>
       </> : <>
-        <Link {...current('search')} to="/passenger?view=search"><Icon name="road" size={19} />Find a ride</Link>
-        <Link {...current('bookings')} to="/passenger?view=bookings"><Icon name="bag" size={19} />My bookings</Link>
+        <Link {...current('search')} to="/passenger/search"><Icon name="road" size={19} />Find a ride</Link>
+        <Link {...current('bookings')} to="/passenger/bookings"><Icon name="bag" size={19} />My bookings</Link>
       </>}
       <Link to="/account"><Icon name="user" size={19} />My account</Link>
     </nav>
@@ -56,8 +67,9 @@ export function DashboardShell({ mode, active, children }: { mode: AccountMode; 
   </div>;
 }
 
-function JourneyRow({ ride, status, driver }: { ride: Ride; status: string; driver: boolean }) {
-  return <article className="journey-row"><span className="icon-tile"><Icon name="road" size={21} /></span><div className="journey-route"><h3>{ride.origin} <span aria-label="to">→</span> {ride.destination}</h3><p><Icon name="clock" size={14} /><time dateTime={ride.departure_time}>{formatDeparture(ride.departure_time)}</time></p>{!driver && <span className="ride-state">Ride: {ride.status}</span>}</div><div className="journey-status"><span className={`status-pill ${status}`}>{status}</span>{driver && <span>{ride.available_seats} seats remaining</span>}{driver && <Link className="manage-link" to={`/driver/rides/${ride.id}`} aria-label={`Manage ride: ${ride.origin} to ${ride.destination}`}>Manage</Link>}</div></article>;
+function JourneyRow({ ride, status, driver, counts }: { ride: Ride; status: string; driver: boolean; counts?: RideBookingCounts }) {
+  const pending = pendingLabel(counts);
+  return <article className="journey-row"><span className="icon-tile"><Icon name="road" size={21} /></span><div className="journey-route"><h3>{ride.origin} <span aria-label="to">→</span> {ride.destination}</h3><p><Icon name="clock" size={14} /><time dateTime={ride.departure_time}>{formatDeparture(ride.departure_time)}</time></p>{!driver && <span className="ride-state">Ride: {ride.status}</span>}</div><div className="journey-status"><span className={`status-pill ${status}`}>{status}</span>{driver && <span>{ride.available_seats} seats remaining</span>}{driver && pending && counts!.pending > 0 && <span className="status-pill pending">{pending}</span>}{driver && <Link className="manage-link" to={`/driver/rides/${ride.id}`} aria-label={`Manage ride: ${ride.origin} to ${ride.destination}`}>Manage</Link>}</div></article>;
 }
 
 export function Account() {

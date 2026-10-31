@@ -10,7 +10,7 @@ const tomorrow = () => new Date(Date.parse(`${karachiToday()}T00:00:00Z`) + 86_4
 describe('ride search filters', () => {
   it('sends from, to and a PKT day window, and shows seats, PKR fare, PKT time and status', async () => {
     const day = tomorrow();
-    const harness = renderPassenger('/passenger?view=search', {
+    const harness = renderPassenger('/passenger/search', {
       'GET /rides/': url => json(url.searchParams.get('origin') ? [ride({ available_seats: 1 })] : []),
     });
     expect(await screen.findByText('No rides found.')).toBeInTheDocument();
@@ -28,11 +28,11 @@ describe('ride search filters', () => {
     expect(within(card).getByText('active')).toBeInTheDocument();
     expect(screen.getByText('1 ride found.')).toBeInTheDocument();
     // Filters live in the URL so the search survives reloads and the back button.
-    expect(screen.getByTestId('location').textContent).toBe(`/passenger?view=search&from=Lahore&to=Islamabad&date=${day}`);
+    expect(screen.getByTestId('location').textContent).toBe(`/passenger/search?from=Lahore&to=Islamabad&date=${day}`);
   });
 
   it('blocks a past date and identical places before calling the API', async () => {
-    const harness = renderPassenger('/passenger?view=search', { 'GET /rides/': () => json([]) });
+    const harness = renderPassenger('/passenger/search', { 'GET /rides/': () => json([]) });
     await screen.findByText('No rides found.');
     const before = harness.calls.length;
     await userEvent.type(screen.getByLabelText('From'), 'Lahore');
@@ -47,7 +47,7 @@ describe('ride search filters', () => {
   });
 
   it('validates hand-edited URLs too and never sends them', async () => {
-    const harness = renderPassenger('/passenger?view=search&date=2026-02-30', { 'GET /rides/': () => json([]) });
+    const harness = renderPassenger('/passenger/search?date=2026-02-30', { 'GET /rides/': () => json([]) });
     expect(await screen.findByText('Fix the filters to search.')).toBeInTheDocument();
     expect(harness.calls.some(c => c.url.pathname === '/rides/')).toBe(false);
     expect(validateFilters({ from: 'a'.repeat(101), to: '', date: '' }).from).toBeTruthy();
@@ -55,7 +55,7 @@ describe('ride search filters', () => {
 
   it('shows an error state with retry that recovers, without leaking server text', async () => {
     let fail = true;
-    renderPassenger('/passenger?view=search', { 'GET /rides/': () => fail ? json({ detail: 'asyncpg pool exhausted' }, 503) : json([ride()]) });
+    renderPassenger('/passenger/search', { 'GET /rides/': () => fail ? json({ detail: 'asyncpg pool exhausted' }, 503) : json([ride()]) });
     expect(await screen.findByText('We couldn’t load rides.')).toBeInTheDocument();
     expect(screen.queryByText(/asyncpg/)).toBeNull();
     fail = false;
@@ -64,7 +64,7 @@ describe('ride search filters', () => {
   });
 
   it('pages with offset and disables Next on a short page', async () => {
-    const harness = renderPassenger('/passenger?view=search', {
+    const harness = renderPassenger('/passenger/search', {
       'GET /rides/': url => json(url.searchParams.get('offset') === '0' ? Array.from({ length: 20 }, (_, i) => ride({ id: i + 1 })) : [ride({ id: 99 })]),
     });
     await screen.findAllByRole('article');

@@ -9,7 +9,7 @@ const upcoming = () => ride({ departure_time: futureIso() });
 
 describe('ride details and seat request', () => {
   it('requests a seat with POST /bookings/{ride_id} and shows the pending state', async () => {
-    const harness = renderPassenger('/passenger?ride=7', {
+    const harness = renderPassenger('/passenger/rides/7', {
       'GET /rides/7': () => json(upcoming()),
       'GET /bookings/me': () => json([]),
       'POST /bookings/7': () => json({ id: 70, ride_id: 7, passenger_id: 42, status: 'pending' }, 201),
@@ -29,7 +29,7 @@ describe('ride details and seat request', () => {
     ['Ride has already departed', 'already departed'],
     ['Ride is not active', 'no longer taking requests'],
   ])('maps 409 "%s" to a friendly alert', async (detail, text) => {
-    renderPassenger('/passenger?ride=7', {
+    renderPassenger('/passenger/rides/7', {
       'GET /rides/7': () => json(upcoming()), 'GET /bookings/me': () => json([]),
       'POST /bookings/7': () => json({ detail }, 409),
     });
@@ -45,7 +45,7 @@ describe('ride details and seat request', () => {
     [429, { detail: 'Too many requests' }, { 'Retry-After': '42' }, 'wait 42 seconds'],
     [502, { detail: 'upstream secret' }, {}, 'temporarily unavailable'],
   ])('maps %s to a friendly alert', async (status, body, headers, text) => {
-    renderPassenger('/passenger?ride=7', {
+    renderPassenger('/passenger/rides/7', {
       'GET /rides/7': () => json(upcoming()), 'GET /bookings/me': () => json([]),
       'POST /bookings/7': () => json(body, status as number, headers as Record<string, string>),
     });
@@ -55,7 +55,7 @@ describe('ride details and seat request', () => {
   });
 
   it('a network failure leaves the button available to retry', async () => {
-    renderPassenger('/passenger?ride=7', {
+    renderPassenger('/passenger/rides/7', {
       'GET /rides/7': () => json(upcoming()), 'GET /bookings/me': () => json([]),
       'POST /bookings/7': () => Promise.reject(new TypeError('Failed to fetch')),
     });
@@ -65,7 +65,7 @@ describe('ride details and seat request', () => {
   });
 
   it('a 401 ends the session and sends the passenger to sign in, keeping the return path', async () => {
-    renderPassenger('/passenger?ride=7', {
+    renderPassenger('/passenger/rides/7', {
       'GET /rides/7': () => json(upcoming()), 'GET /bookings/me': () => json([]),
       'POST /bookings/7': () => json({ detail: 'Invalid token' }, 401),
     });
@@ -81,24 +81,24 @@ describe('ride details and seat request', () => {
     ['cancelled', { status: 'cancelled' as const }, 'cancelled by the driver'],
     ['completed', { status: 'completed' as const }, 'has been completed'],
   ])('a %s ride is shown as such and is not bookable', async (_, overrides, text) => {
-    renderPassenger('/passenger?ride=7', { 'GET /rides/7': () => json({ ...upcoming(), ...overrides }), 'GET /bookings/me': () => json([]) });
+    renderPassenger('/passenger/rides/7', { 'GET /rides/7': () => json({ ...upcoming(), ...overrides }), 'GET /bookings/me': () => json([]) });
     expect(await screen.findByText('Not available to book.')).toBeInTheDocument();
     expect(screen.getByText(text, { exact: false })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Request a seat/ })).toBeNull();
   });
 
   it('shows an existing active request instead of offering a duplicate', async () => {
-    renderPassenger('/passenger?ride=7', { 'GET /rides/7': () => json(upcoming()), 'GET /bookings/me': () => json([booking({ status: 'accepted' })]) });
+    renderPassenger('/passenger/rides/7', { 'GET /rides/7': () => json(upcoming()), 'GET /bookings/me': () => json([booking({ status: 'accepted' })]) });
     expect(await screen.findByText(/already requested a seat on this ride/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Request a seat/ })).toBeNull();
   });
 
   it('shows not found for a missing or malformed ride id', async () => {
-    renderPassenger('/passenger?ride=999', { 'GET /rides/999': () => json({ detail: 'Ride not found' }, 404), 'GET /bookings/me': () => json([]) });
+    renderPassenger('/passenger/rides/999', { 'GET /rides/999': () => json({ detail: 'Ride not found' }, 404), 'GET /bookings/me': () => json([]) });
     expect(await screen.findByRole('heading', { name: 'Ride not found' })).toBeInTheDocument();
   });
   it('never calls the API for a malformed id', async () => {
-    const harness = renderPassenger('/passenger?ride=abc', {});
+    const harness = renderPassenger('/passenger/rides/abc', {});
     expect(await screen.findByRole('heading', { name: 'Ride not found' })).toBeInTheDocument();
     expect(harness.calls.some(c => c.url.pathname.startsWith('/rides'))).toBe(false);
   });

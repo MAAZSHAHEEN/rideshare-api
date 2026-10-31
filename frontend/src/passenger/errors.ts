@@ -13,6 +13,10 @@ const BOOK_CONFLICTS: Record<string, string> = {
 const CANCEL_CONFLICTS: Record<string, string> = {
   'Booking cannot be cancelled': 'This booking can no longer be cancelled. It may already be rejected or cancelled.',
   'Ride is not active': 'The ride is no longer active, so this booking can’t be cancelled.',
+  // PR #12 cancellation cut-off: an accepted seat can't be released at or after departure.
+  'Ride has already departed': 'This ride has already departed, so an accepted seat can no longer be cancelled.',
+  // PR #20 (pending expiry).
+  'Booking request has expired': 'This request has expired, so there is nothing left to cancel.',
 };
 const FORBIDDEN: Record<string, string> = {
   'You cannot book your own ride': 'You can’t request a seat on a ride you are driving.',

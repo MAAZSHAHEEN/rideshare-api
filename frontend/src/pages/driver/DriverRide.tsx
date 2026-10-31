@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { ApiError } from '../../api/client';
+import { useIdempotencyKeys } from '../../api/idempotency';
 import type { DriverBooking, Ride } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -10,6 +11,7 @@ import type { DriverAction } from '../../driver/errors';
 import { BOOKING_HELP, BOOKING_LABELS, BOOKING_ORDER, FILTER_LABELS, acceptBlockedReason, canCancelRide, canCompleteRide, canReject, rideFilterOf } from '../../driver/state';
 import { formatDeparture, formatFare, seatsLabel } from '../../passenger/time';
 import { useDriverView } from '../../driver/useDriverView';
+import { useRideBookingCounts } from '../../driver/useRideBookingCounts';
 
 export const REQUESTS_LIMIT = 100;
 type Pending = { kind: 'reject'; booking: DriverBooking } | { kind: 'cancel-ride' } | { kind: 'complete-ride' };
@@ -39,14 +41,17 @@ export function DriverRide({ rideId }: { rideId: number }) {
   const owner = ride.data?.driver_id === user!.id;
   const requests = useQuery({
     queryKey: requestsKey, enabled: valid && owner, refetchInterval: 30_000,
-    queryFn: ({ signal }) => api.rideBookings(rideId, signal, { limit: REQUESTS_LIMIT }),
+    queryFn: ({ signal }) => api.rideBookingsPage(rideId, signal, { limit: REQUESTS_LIMIT }),
   });
+  // D2: server counts stay exact even when the ride has more than REQUESTS_LIMIT requests.
+  const counts = useRideBookingCounts(valid && owner ? [rideId] : []);
 
   /** After any change or conflict, reload the ride, its requests and the ride lists from the server. */
   function refresh() {
     void queryClient.invalidateQueries({ queryKey: rideKey });
     void queryClient.invalidateQueries({ queryKey: requestsKey });
     void queryClient.invalidateQueries({ queryKey: ['my-rides'] });
+    void queryClient.invalidateQueries({ queryKey: ['booking-counts'] });
   }
   function failed(reason: unknown, action: DriverAction, inDialog: boolean) {
     if (reason instanceof ApiError && reason.status === 401) return; // the session ends; the guard sends the driver to sign in
@@ -55,9 +60,14 @@ export function DriverRide({ rideId }: { rideId: number }) {
     if (reason instanceof ApiError && (reason.status === 409 || reason.status === 404 || reason.status === 403)) refresh();
   }
 
+  const idempotency = useIdempotencyKeys();
+  const respondScope = (booking: DriverBooking, accept: boolean) => `respond:${booking.id}:${accept ? 'accept' : 'reject'}`;
   const respond = useMutation({
-    mutationFn: ({ booking, accept }: { booking: DriverBooking; accept: boolean }) => api.respondToBooking(booking.id, accept),
+    // One key per accept/reject action, reused if that action is retried after a network/429/5xx failure (PR #18).
+    mutationFn: ({ booking, accept }: { booking: DriverBooking; accept: boolean }) =>
+      api.respondToBooking(booking.id, accept, undefined, idempotency.keyFor(respondScope(booking, accept))),
     onMutate: () => { setError(''); setNotice(''); setDialogError(''); },
+    onSettled: (_, reason, { booking, accept }) => idempotency.settle(respondScope(booking, accept), reason ?? undefined),
     onSuccess: (_, { booking, accept }) => {
       setConfirm(null);
       setNotice(accept ? `Accepted ${booking.passenger.name}’s request. One seat is now taken.` : `Rejected ${booking.passenger.name}’s request.`);
@@ -102,9 +112,11 @@ export function DriverRide({ rideId }: { rideId: number }) {
 
   const state = rideFilterOf(data, now);
   const blocked = acceptBlockedReason(data, now);
-  const list = requests.data ?? [];
-  const pendingCount = list.filter(b => b.status === 'pending').length;
-  const acceptedCount = list.filter(b => b.status === 'accepted').length;
+  const list = requests.data?.items ?? [];
+  const requestTotal = requests.data?.total ?? null;
+  const serverCounts = counts.data?.get(rideId);
+  const pendingCount = serverCounts?.pending ?? list.filter(b => b.status === 'pending').length;
+  const acceptedCount = serverCounts?.accepted ?? list.filter(b => b.status === 'accepted').length;
   const groups = BOOKING_ORDER.map(status => [status, list.filter(b => b.status === status)] as const).filter(([, items]) => items.length > 0);
   return <div className="passenger-view driver-view">
     {back}
@@ -145,7 +157,7 @@ export function DriverRide({ rideId }: { rideId: number }) {
             </div>}
           </article></li>)}</ul>
         </section>)}</div>}
-      {list.length >= REQUESTS_LIMIT && <p className="field-help panel-footnote">Showing the newest {REQUESTS_LIMIT} requests.</p>}
+      {list.length > 0 && (requestTotal !== null ? requestTotal > list.length : list.length >= REQUESTS_LIMIT) && <p className="field-help panel-footnote">Showing the newest {list.length} of {requestTotal ?? `${REQUESTS_LIMIT}+`} requests.</p>}
     </section>
 
     {confirm?.kind === 'reject' && <ConfirmDialog title="Reject this request?" confirmLabel="Reject request" cancelLabel="Keep request" busy={busy} error={dialogError}

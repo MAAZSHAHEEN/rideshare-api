@@ -4,6 +4,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthProvider';
 import { Icon } from '../../components/Icon';
+import { hasNextPage } from '../../api/client';
 import type { Ride } from '../../api/types';
 import { passengerErrorMessage } from '../../passenger/errors';
 import { formatDeparture, formatFare, isCalendarDate, karachiDayWindow, karachiToday, seatsLabel } from '../../passenger/time';
@@ -11,7 +12,7 @@ import { usePassengerView } from './PassengerArea';
 
 export const PAGE_SIZE = 20;
 const MAX_PLACE = 100;
-// Suggestions only: the API matches origin and destination exactly as typed.
+// Suggestions only: the API matches whole place names, ignoring case and surrounding spaces (G3).
 const CITIES = ['Lahore', 'Islamabad', 'Rawalpindi', 'Faisalabad', 'Gujranwala', 'Multan', 'Peshawar', 'Sialkot'];
 
 export interface SearchFilters { from: string; to: string; date: string }
@@ -53,7 +54,7 @@ export function SearchRides() {
     placeholderData: keepPreviousData,
     queryFn: ({ signal }) => {
       const range = filters.date ? karachiDayWindow(filters.date) : undefined;
-      return api.searchRides({
+      return api.searchRidesPage({
         origin: filters.from || undefined, destination: filters.to || undefined,
         departureFrom: range?.from, departureBefore: range?.before, limit: PAGE_SIZE, offset: page * PAGE_SIZE,
       }, signal);
@@ -71,7 +72,7 @@ export function SearchRides() {
       return;
     }
     setFormErrors(null);
-    const nextParams = new URLSearchParams({ view: 'search' });
+    const nextParams = new URLSearchParams();
     if (next.from) nextParams.set('from', next.from);
     if (next.to) nextParams.set('to', next.to);
     if (next.date) nextParams.set('date', next.date);
@@ -79,7 +80,7 @@ export function SearchRides() {
   }
   function clear() {
     setFormErrors(null);
-    setParams(new URLSearchParams({ view: 'search' }));
+    setParams(new URLSearchParams());
   }
   function goToPage(next: number) {
     const nextParams = new URLSearchParams(params);
@@ -87,7 +88,10 @@ export function SearchRides() {
     setParams(nextParams);
   }
 
-  const rides = query.data ?? [];
+  const rides = query.data?.items ?? [];
+  const total = query.data?.total ?? null;
+  const offset = page * PAGE_SIZE;
+  const pages = total !== null ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : null;
   const described = (name: keyof SearchFilters, help?: string) => [help, errors[name] ? `${name}-error` : undefined].filter(Boolean).join(' ') || undefined;
   return <div className="passenger-view">
     <div className="view-heading"><span className="eyebrow">FIND A RIDE</span><h1 id="search-heading" tabIndex={-1}>Where are you heading?</h1><p>Upcoming rides only. Times are shown in Pakistan time (PKT).</p></div>
@@ -99,28 +103,36 @@ export function SearchRides() {
         <div className="field"><label htmlFor="search-date">Date (PKT)</label><input id="search-date" name="date" type="date" defaultValue={filters.date} min={karachiToday()} aria-invalid={Boolean(errors.date)} aria-describedby={described('date', 'date-help')} /><span className="field-help" id="date-help">Optional. Leave empty for all upcoming dates.</span><span className="field-error" id="date-error">{errors.date}</span></div>
       </div>
       <datalist id="city-suggestions">{CITIES.map(city => <option key={city} value={city} />)}</datalist>
-      <p className="field-help">Place names must match the ride exactly, for example “Lahore”.</p>
+      <p className="field-help">Use the whole place name, for example “Lahore”. Capital letters don’t matter.</p>
       <div className="search-actions"><button className="button" type="submit">Search rides <Icon name="arrow" size={17} /></button><button className="button button-outline" type="button" onClick={clear}>Clear filters</button></div>
     </form>
 
     <section className="results-panel" aria-labelledby="results-heading" aria-busy={query.isFetching}>
-      <div className="history-heading"><div><h2 id="results-heading">Available rides</h2><p role="status" aria-live="polite">{resultSummary(query.isPending && query.fetchStatus !== 'idle', query.isError, rides.length, page)}</p></div>
+      <div className="history-heading"><div><h2 id="results-heading">Available rides</h2><p role="status" aria-live="polite">{resultSummary(query.isPending && query.fetchStatus !== 'idle', query.isError, rides.length, page, total)}</p></div>
         <button className="button button-outline small" onClick={() => void query.refetch()} disabled={query.isFetching || Object.keys(urlErrors).length > 0}>{query.isFetching ? 'Refreshing…' : 'Refresh'}</button></div>
       {Object.keys(urlErrors).length > 0 ? <div className="state-panel"><h3>Fix the filters to search.</h3><p>One of the search filters isn’t valid.</p></div>
         : query.isPending ? <div className="state-panel"><span className="spinner blue" aria-hidden="true" /><p>Looking for rides…</p></div>
         : query.isError ? <div className="state-panel"><h3>We couldn’t load rides.</h3><p role="alert">{passengerErrorMessage(query.error, 'search')}</p><button className="button small" onClick={() => void query.refetch()}>Try again</button></div>
         : rides.length === 0 ? <div className="state-panel"><span className="empty-illustration"><Icon name="car" size={34} /></span><h3>{page ? 'No more rides.' : 'No rides match yet.'}</h3><p>{page ? 'Go back to see earlier results.' : 'Try another date, or clear a filter to see every upcoming ride.'}</p></div>
         : <ul className="ride-list">{rides.map(ride => <li key={ride.id}><RideCard ride={ride} back={location.search} /></li>)}</ul>}
-      <div className="pagination"><span>Page {page + 1}</span><div><button disabled={page === 0 || query.isFetching} onClick={() => goToPage(page - 1)}>← Previous</button><button disabled={rides.length < PAGE_SIZE || query.isFetching || query.isError} onClick={() => goToPage(page + 1)}>Next →</button></div></div>
+      <div className="pagination"><span>Page {page + 1}{pages !== null ? ` of ${pages}` : ''}</span><div><button disabled={page === 0 || query.isFetching} onClick={() => goToPage(page - 1)}>← Previous</button><button disabled={!hasNextPage(offset, rides.length, PAGE_SIZE, total) || query.isFetching || query.isError} onClick={() => goToPage(page + 1)}>Next →</button></div></div>
     </section>
   </div>;
 }
 
-function resultSummary(loading: boolean, failed: boolean, count: number, page: number) {
+/** Live result summary. With the server total (G7) it counts every match, not just this page. */
+export function resultSummary(loading: boolean, failed: boolean, count: number, page: number, total: number | null = null) {
   if (loading) return 'Searching…';
   if (failed) return 'Search failed.';
+  const rides = (n: number) => `${n.toLocaleString('en-PK')} ride${n === 1 ? '' : 's'}`;
+  if (total !== null) {
+    if (total === 0) return 'No rides found.';
+    if (count === 0) return `No more rides on this page. ${rides(total)} found in total.`;
+    const first = page * PAGE_SIZE + 1;
+    return total > count || page ? `${rides(total)} found. Showing ${first}–${first + count - 1}.` : `${rides(total)} found.`;
+  }
   if (count === 0) return page ? 'No more rides on this page.' : 'No rides found.';
-  return `${count} ride${count === 1 ? '' : 's'} found${page ? ` on page ${page + 1}` : ''}.`;
+  return `${rides(count)} found${page ? ` on page ${page + 1}` : ''}.`;
 }
 
 export function RideCard({ ride, back }: { ride: Ride; back?: string }) {
@@ -130,6 +142,6 @@ export function RideCard({ ride, back }: { ride: Ride; back?: string }) {
       <p className="ride-time"><Icon name="clock" size={14} /><time dateTime={ride.departure_time}>{formatDeparture(ride.departure_time)}</time></p>
       <dl className="ride-facts"><div><dt>Fare</dt><dd>{formatFare(ride.fare_per_seat)} <span>per seat</span></dd></div><div><dt>Seats</dt><dd>{seatsLabel(ride.available_seats)}</dd></div><div><dt>Status</dt><dd><span className={`status-pill ${ride.status}`}>{ride.status}</span></dd></div></dl>
     </div>
-    <Link className="button button-outline small" to={`/passenger?ride=${ride.id}`} state={{ back }} aria-label={`View details: ${ride.origin} to ${ride.destination}, ${formatDeparture(ride.departure_time)}`}>View details</Link>
+    <Link className="button button-outline small" to={`/passenger/rides/${ride.id}`} state={{ back }} aria-label={`View details: ${ride.origin} to ${ride.destination}, ${formatDeparture(ride.departure_time)}`}>View details</Link>
   </article>;
 }

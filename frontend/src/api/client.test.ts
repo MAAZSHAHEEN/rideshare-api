@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createApiClient, parseApiError, parseRetryAfter, rideSearchQuery } from './client';
+import { BOOKING_COUNTS_MAX, createApiClient, hasNextPage, myBookingsQuery, myRidesQuery, parseApiError, parseRetryAfter, parseTotalCount, rideSearchQuery } from './client';
 
 describe('typed API boundary', () => {
   afterEach(() => vi.unstubAllEnvs());
@@ -7,7 +7,7 @@ describe('typed API boundary', () => {
   it('uses relative same-origin URLs by default in production', async () => {
     vi.stubEnv('PROD', true);
     vi.stubEnv('VITE_API_BASE_URL', '');
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('[]'))));
     const api = createApiClient(() => ({ token: 'private', generation: 1 }), vi.fn());
     await api.me('private');
     await api.myRides(0);
@@ -101,7 +101,7 @@ describe('passenger journey client (AST-023)', () => {
     expect(rideSearchQuery({ origin: 'Lahore&admin=1', destination: 'Isl#amabad' })).toBe('origin=Lahore%26admin%3D1&destination=Isl%23amabad&limit=20&offset=0');
   });
   it('requests, cancels and reads with the existing endpoints and methods', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('[]'))));
     const client = api();
     await client.getRide(7);
     await client.bookRide(7);
@@ -132,7 +132,7 @@ describe('passenger journey client (AST-023)', () => {
     expect(failure.message).not.toContain('psycopg');
   });
   it('driver journey uses the existing endpoints, methods and query names', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('[]'))));
     const client = api();
     const input = { origin: 'Lahore', destination: 'Islamabad', departure_time: '2030-06-12T09:30:00+05:00', available_seats: 3, fare_per_seat: 2500 };
     await client.createRide(input);
@@ -174,5 +174,87 @@ describe('passenger journey client (AST-023)', () => {
     expect(parseRetryAfter('Sat, 31 Oct 2026 00:00:00 GMT', now)).toBeUndefined();
     expect(parseRetryAfter('soon', now)).toBeUndefined();
     expect(parseRetryAfter(null, now)).toBeUndefined();
+  });
+});
+
+describe('API gaps adoption (PR #17): totals, ride lookup, driver filters, counts', () => {
+  const api = () => createApiClient(() => ({ token: 'private', generation: 1 }), vi.fn());
+  const page = (body: unknown, total?: string) => new Response(JSON.stringify(body), { headers: total === undefined ? {} : { 'X-Total-Count': total } });
+  const urls = () => (fetch as ReturnType<typeof vi.fn>).mock.calls.map(([url]) => String(url));
+
+  it.each([
+    [null, null], ['0', 0], ['37', 37], [' 12 ', 12], ['', null], ['-1', null], ['1.5', null], ['12abc', null], ['1e3', null],
+    ['0x10', null], ['9007199254740993', null], ['999999999999999', 999999999999999],
+  ] as const)('parses X-Total-Count %j as %j', (value, expected) => {
+    expect(parseTotalCount(value)).toBe(expected);
+  });
+
+  it('decides "next page" from the total when known and from the page size otherwise', () => {
+    expect(hasNextPage(0, 20, 20, 20)).toBe(false); // exactly one full page
+    expect(hasNextPage(0, 20, 20, 21)).toBe(true);
+    expect(hasNextPage(20, 1, 20, 21)).toBe(false);
+    expect(hasNextPage(0, 3, 20, 0)).toBe(false);
+    expect(hasNextPage(0, 20, 20, null)).toBe(true); // older backend: heuristic
+    expect(hasNextPage(0, 19, 20, null)).toBe(false);
+  });
+
+  it('page variants return the rows with the server total (or null when missing or invalid)', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(page([{ id: 1 }], '41'))
+      .mockResolvedValueOnce(page([], '0'))
+      .mockResolvedValueOnce(page([{ id: 2 }]))
+      .mockResolvedValueOnce(page([{ id: 3 }], 'many')));
+    const client = api();
+    await expect(client.searchRidesPage({ origin: 'Lahore' })).resolves.toEqual({ items: [{ id: 1 }], total: 41 });
+    await expect(client.myBookingsPage(0)).resolves.toEqual({ items: [], total: 0 });
+    await expect(client.myRidesPage(0)).resolves.toEqual({ items: [{ id: 2 }], total: null });
+    await expect(client.rideBookingsPage(7)).resolves.toEqual({ items: [{ id: 3 }], total: null });
+  });
+
+  it('plain list reads keep returning arrays, and a non-array body is rejected', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(page([{ id: 1 }], '1')).mockResolvedValueOnce(page({ detail: 'odd' }, '1')));
+    await expect(api().myRides(0)).resolves.toEqual([{ id: 1 }]);
+    await expect(api().myRides(0)).rejects.toMatchObject({ status: 0 });
+  });
+
+  it('G2: my bookings for one ride sends ride_id and rejects invalid ids without a request', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(page([], '0'))));
+    await api().myBookings(0, undefined, { rideId: 7, limit: 5 });
+    expect(urls()).toEqual(['http://localhost:8000/bookings/me?limit=5&offset=0&ride_id=7']);
+    expect(myBookingsQuery(20, { status: 'accepted', rideId: 9 })).toBe('limit=20&offset=20&status=accepted&ride_id=9');
+    for (const bad of [0, -3, 1.5, Number.NaN]) await expect(api().myBookings(0, undefined, { rideId: bad })).rejects.toMatchObject({ status: 404 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('D1: my rides maps when, order and the departure window to the server names', async () => {
+    expect(myRidesQuery(0, { status: 'active', when: 'upcoming', order: 'asc', limit: 20 })).toBe('limit=20&offset=0&status=active&when=upcoming&order=asc');
+    expect(myRidesQuery(40, { when: 'departed' })).toBe('limit=20&offset=40&when=departed');
+    const window = myRidesQuery(0, { departureFrom: '2026-11-01' + 'T00:00:00+05:00', departureBefore: '2026-11-02' + 'T00:00:00+05:00' });
+    expect(window).toContain('departure_from=2026-11-01T00%3A00%3A00%2B05%3A00');
+    expect(window).toContain('departure_before=2026-11-02T00%3A00%3A00%2B05%3A00');
+    expect(myRidesQuery(0)).toBe('limit=20&offset=0');
+  });
+
+  it('D2: booking counts — one call per 100 ids, de-duplicated, none for an empty page', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      const ids = new URL(url).searchParams.getAll('ride_id').map(Number);
+      return Promise.resolve(page(ids.map(ride_id => ({ ride_id, pending: 1, accepted: 0, rejected: 0, cancelled: 0 }))));
+    }));
+    await expect(api().rideBookingCounts([])).resolves.toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    const rows = await api().rideBookingCounts([3, 1, 3, 2]);
+    expect(urls()).toEqual(['http://localhost:8000/rides/me/booking-counts?ride_id=3&ride_id=1&ride_id=2']);
+    expect(rows.map(r => r.ride_id)).toEqual([3, 1, 2]);
+    const many = Array.from({ length: BOOKING_COUNTS_MAX * 2 + 1 }, (_, i) => i + 1);
+    const all = await api().rideBookingCounts(many);
+    expect(all).toHaveLength(many.length);
+    const chunks = urls().slice(1).map(url => new URL(url).searchParams.getAll('ride_id').length);
+    expect(chunks).toEqual([100, 100, 1]);
+  });
+
+  it('D2: booking counts reject invalid ids without a request', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    await expect(api().rideBookingCounts([1, 0])).rejects.toMatchObject({ status: 404 });
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

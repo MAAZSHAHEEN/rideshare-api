@@ -225,6 +225,10 @@ describe('post-login return path', () => {
   it.each([
     ['/passenger?ride=7', '/passenger?ride=7'],
     ['/passenger?view=search&from=Lahore', '/passenger?view=search&from=Lahore'],
+    ['/passenger/search', '/passenger/search'],
+    ['/passenger/search?from=Lahore&page=2', '/passenger/search?from=Lahore&page=2'],
+    ['/passenger/bookings?status=pending', '/passenger/bookings?status=pending'],
+    ['/passenger/rides/7', '/passenger/rides/7'],
     ['/driver', '/driver'],
     ['/driver/rides', '/driver/rides'],
     ['/driver/rides?filter=upcoming', '/driver/rides?filter=upcoming'],
@@ -232,6 +236,7 @@ describe('post-login return path', () => {
     ['/driver/rides/7', '/driver/rides/7'],
     ['/account', '/account'],
   ])('accepts in-app path %s', (value, expected) => expect(safeReturnPath(value)).toBe(expected));
-  it.each([undefined, 5, '', 'passenger', '//evil.example.com/passenger', '/\\evil.example.com', 'https://evil.example.com/passenger', 'javascript:alert(1)', '/login', '/passengerx', '/%2F%2Fevil.example.com', '/driverx', '/driver/', '/driver/rides/0', '/driver/rides/7/x', '/driver/admin', '/driver/rides//evil.example.com', '/driver/rides/%2F%2Fevil'])(
+  it.each([undefined, 5, '', 'passenger', '//evil.example.com/passenger', '/\\evil.example.com', 'https://evil.example.com/passenger', 'javascript:alert(1)', '/login', '/passengerx', '/%2F%2Fevil.example.com', '/driverx', '/driver/', '/driver/rides/0', '/driver/rides/7/x', '/driver/admin', '/driver/rides//evil.example.com', '/driver/rides/%2F%2Fevil',
+    '/passenger/', '/passenger/rides', '/passenger/rides/0', '/passenger/rides/7/x', '/passenger/admin', '/passenger/searchx', '/passenger/rides//evil.example.com', '/passenger/rides/%2F%2Fevil', '/passenger/bookings/1'])(
     'rejects %j', value => expect(safeReturnPath(value)).toBeNull());
 });

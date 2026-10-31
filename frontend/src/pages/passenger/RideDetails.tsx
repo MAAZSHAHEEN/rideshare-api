@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { ApiError } from '../../api/client';
+import { useIdempotencyKeys } from '../../api/idempotency';
 import type { Booking, PassengerBooking, Ride } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { Icon } from '../../components/Icon';
@@ -18,12 +19,28 @@ export function unavailableReason(ride: Ride, now = Date.now()): string | null {
   return null;
 }
 
+export const MY_RIDE_BOOKINGS_LIMIT = 5;
+
+/** The caller's live (pending or accepted) booking for this ride, if the lookup returned one. */
+export function liveBookingFor(bookings: PassengerBooking[] | undefined, rideId: number): PassengerBooking | undefined {
+  return bookings?.find(b => b.ride_id === rideId && (b.status === 'pending' || b.status === 'accepted'));
+}
+
+/**
+ * "Back to search" target. The search page passes its own query string in
+ * navigation state; only a query string is accepted and it is appended to a
+ * fixed path, so state can never point the link anywhere else.
+ */
+export function searchBackPath(back: unknown): string {
+  if (typeof back === 'string' && back.length <= 600 && (back === '' || (back.startsWith('?') && !back.includes('#')))) return `/passenger/search${back}`;
+  return '/passenger/search';
+}
+
 export function RideDetails({ rideId }: { rideId: number }) {
   const { api, user } = useAuth();
   const queryClient = useQueryClient();
   const location = useLocation();
-  const back = typeof (location.state as { back?: unknown } | null)?.back === 'string' && String((location.state as { back: string }).back).startsWith('?view=search')
-    ? `/passenger${(location.state as { back: string }).back}` : '/passenger?view=search';
+  const back = searchBackPath((location.state as { back?: unknown } | null)?.back);
   const [now, setNow] = useState(() => Date.now());
   const [created, setCreated] = useState<Booking | null>(null);
   const [error, setError] = useState('');
@@ -37,16 +54,21 @@ export function RideDetails({ rideId }: { rideId: number }) {
 
   const valid = Number.isSafeInteger(rideId) && rideId > 0;
   const ride = useQuery({ queryKey: ['ride', user!.id, rideId], enabled: valid, queryFn: ({ signal }) => api.getRide(rideId, signal) });
-  // Best effort: the API has no "my booking for this ride" lookup, so check the newest 100 bookings.
+  // G2: the caller's bookings for this ride only, newest first. At most one is
+  // live (pending/accepted, partial unique index), so a handful covers history.
   const mine = useQuery({
-    queryKey: ['my-bookings', user!.id, 'recent-100'], enabled: valid,
-    queryFn: ({ signal }) => api.myBookings(0, signal, { limit: 100 }),
+    queryKey: ['my-bookings', user!.id, 'ride', rideId], enabled: valid,
+    queryFn: ({ signal }) => api.myBookings(0, signal, { rideId, limit: MY_RIDE_BOOKINGS_LIMIT }),
   });
-  const existing: PassengerBooking | undefined = mine.data?.find(b => b.ride_id === rideId && (b.status === 'pending' || b.status === 'accepted'));
+  const existing = liveBookingFor(mine.data, rideId);
 
+  const idempotency = useIdempotencyKeys();
+  const bookScope = `book:${rideId}`;
   const book = useMutation({
-    mutationFn: () => api.bookRide(rideId),
+    // The same key is reused if this request is retried after a network/429/5xx failure (PR #18).
+    mutationFn: (key: string) => api.bookRide(rideId, undefined, key),
     onMutate: () => { setError(''); setCreated(null); },
+    onSettled: (_, reason) => idempotency.settle(bookScope, reason ?? undefined),
     onSuccess: booking => {
       setCreated(booking);
       void queryClient.invalidateQueries({ queryKey: ['my-bookings'] });
@@ -67,13 +89,13 @@ export function RideDetails({ rideId }: { rideId: number }) {
     if (book.isPending || !ride.data) return;
     const reason = unavailableReason(ride.data, Date.now());
     if (reason) { setNow(Date.now()); setError(reason); return; }
-    book.mutate();
+    book.mutate(idempotency.keyFor(bookScope));
   }
 
   const heading = <h1 id="ride-heading" tabIndex={-1}>{ride.data ? <>{ride.data.origin} <span aria-label="to">→</span> {ride.data.destination}</> : 'Ride details'}</h1>;
   if (!valid || (ride.error instanceof ApiError && ride.error.status === 404)) {
     return <div className="passenger-view"><Link className="back-link" to={back}>← Back to search</Link><div className="view-heading">{heading}</div>
-      <div className="state-panel bordered"><h2 className="state-title">Ride not found</h2><p role="alert">{passengerErrorMessage(new ApiError(404, ''), 'load-ride')}</p><Link className="button small" to="/passenger?view=search">Search rides</Link></div></div>;
+      <div className="state-panel bordered"><h2 className="state-title">Ride not found</h2><p role="alert">{passengerErrorMessage(new ApiError(404, ''), 'load-ride')}</p><Link className="button small" to="/passenger/search">Search rides</Link></div></div>;
   }
   if (ride.isPending) return <div className="passenger-view"><Link className="back-link" to={back}>← Back to search</Link><div className="view-heading">{heading}</div><div className="state-panel bordered" role="status"><span className="spinner blue" aria-hidden="true" /><p>Loading ride details…</p></div></div>;
   if (ride.isError) return <div className="passenger-view"><Link className="back-link" to={back}>← Back to search</Link><div className="view-heading">{heading}</div><div className="state-panel bordered"><h2 className="state-title">We couldn’t load this ride.</h2><p role="alert">{passengerErrorMessage(ride.error, 'load-ride')}</p><button className="button small" onClick={() => void ride.refetch()}>Try again</button></div></div>;
@@ -93,8 +115,8 @@ export function RideDetails({ rideId }: { rideId: number }) {
         <div><dt>Ride status</dt><dd><span className={`status-pill ${data.status}`}>{data.status}</span></dd></div>
       </dl>
       <div className="booking-box">
-        {created ? <div className="notice success" role="status" tabIndex={-1} ref={successRef}><strong>Seat requested.</strong> Your booking is <span className="status-pill pending">pending</span> until the driver accepts or rejects it. <Link to="/passenger?view=bookings">View my bookings</Link></div>
-          : current ? <div className="notice" role="status">You’ve already requested a seat on this ride. Status: <span className={`status-pill ${current.status}`}>{current.status}</span> <Link to="/passenger?view=bookings">Manage in My bookings</Link></div>
+        {created ? <div className="notice success" role="status" tabIndex={-1} ref={successRef}><strong>Seat requested.</strong> Your booking is <span className="status-pill pending">pending</span> until the driver accepts or rejects it. <Link to="/passenger/bookings">View my bookings</Link></div>
+          : current ? <div className="notice" role="status">You’ve already requested a seat on this ride. Status: <span className={`status-pill ${current.status}`}>{current.status}</span> <Link to="/passenger/bookings">Manage in My bookings</Link></div>
           : reason ? <div className="notice" role="status"><strong>Not available to book.</strong> {reason}</div>
           : <p className="booking-hint">Request one seat. The driver decides whether to accept. You can cancel from My bookings.</p>}
         {error && <div className="notice error" role="alert" tabIndex={-1} ref={errorRef}>{error}</div>}

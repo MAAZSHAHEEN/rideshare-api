@@ -21,6 +21,11 @@ describe('booking error copy', () => {
     expect(passengerErrorMessage(err(409, 'Booking cannot be cancelled'), 'cancel')).toContain('can no longer be cancelled');
     expect(passengerErrorMessage(err(409, 'Ride is not active'), 'cancel')).toContain('no longer active');
   });
+  it('PR #12: cancelling an accepted seat after departure has specific copy (cancel only)', () => {
+    expect(passengerErrorMessage(err(409, 'Ride has already departed'), 'cancel')).toBe('This ride has already departed, so an accepted seat can no longer be cancelled.');
+    expect(passengerErrorMessage(err(409, 'Ride has already departed'), 'book')).toBe('This ride has already departed, so it can’t be booked.');
+    expect(passengerErrorMessage(err(409, 'ride has already departed'), 'cancel')).toBe('This booking can’t be cancelled right now.');
+  });
   it('never shows an unknown server detail verbatim', () => {
     const secret = 'duplicate key value violates unique constraint "uq_bookings_active_passenger_ride"';
     for (const status of [400, 403, 404, 409, 422, 418]) {

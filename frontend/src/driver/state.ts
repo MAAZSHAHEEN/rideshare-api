@@ -1,4 +1,4 @@
-import type { BookingStatus, Ride } from '../api/types';
+import type { BookingStatus, Ride, RideBookingCounts } from '../api/types';
 import { hasDeparted } from '../passenger/time';
 
 // Derived ride states for the driver UI. "Departed" is not stored by the API
@@ -32,11 +32,18 @@ export const canCancelRide = (ride: Ride) => ride.status === 'active';
  */
 export const canCompleteRide = (ride: Ride, now = Date.now()) => ride.status === 'active' && hasDeparted(ride.departure_time, now);
 
-export const BOOKING_ORDER: BookingStatus[] = ['pending', 'accepted', 'rejected', 'cancelled'];
-export const BOOKING_LABELS: Record<BookingStatus, string> = { pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected', cancelled: 'Cancelled' };
+export const BOOKING_ORDER: BookingStatus[] = ['pending', 'accepted', 'rejected', 'cancelled', 'expired'];
+export const BOOKING_LABELS: Record<BookingStatus, string> = { pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected', cancelled: 'Cancelled', expired: 'Expired' };
 export const BOOKING_HELP: Record<BookingStatus, string> = {
   pending: 'Waiting for your answer.',
   accepted: 'Seat confirmed. Each accepted request uses one seat.',
   rejected: 'You declined these requests.',
   cancelled: 'Withdrawn by the passenger, or cancelled with the ride.',
+  expired: 'Not answered in time, or still pending at departure. Read-only.',
 };
+
+/** "2 pending" for a ride card; null while counts are unknown (never a guess). */
+export function pendingLabel(counts: RideBookingCounts | undefined): string | null {
+  if (!counts) return null;
+  return counts.pending === 0 ? 'No pending' : `${counts.pending} pending`;
+}

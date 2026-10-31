@@ -9,15 +9,24 @@ export type DriverAction = 'create' | 'load-rides' | 'load-ride' | 'load-request
 const ACCEPT_CONFLICTS: Record<string, string> = {
   'No seats available': 'No seats are left on this ride, so this request can’t be accepted. Requests and seats have been refreshed.',
   'Ride has already departed': 'This ride has already departed, so requests can no longer be accepted.',
-  'Booking already responded to': 'This request was already answered, or the passenger withdrew it. The list has been refreshed with its current status.',
+  // The server still sends this for accepted/rejected requests and for requests cancelled with their ride.
+  'Booking already responded to': 'This request was already answered. The list has been refreshed with its current status.',
+  // D7 (PR #17): a pending request the passenger withdrew while the ride is still active.
+  'Booking was cancelled by the passenger': 'The passenger withdrew this request, so it can’t be answered. The list has been refreshed.',
   'Ride is not active': 'This ride is no longer active (it was cancelled or completed), so requests can’t be answered.',
+  // PR #20 (pending expiry): the request timed out before it was answered.
+  'Booking request has expired': 'This request expired before it was answered, so it can’t be accepted. The list has been refreshed.',
 };
 const REJECT_CONFLICTS: Record<string, string> = {
   'Booking already responded to': ACCEPT_CONFLICTS['Booking already responded to'],
+  'Booking was cancelled by the passenger': ACCEPT_CONFLICTS['Booking was cancelled by the passenger'],
+  'Booking request has expired': 'This request has expired. The list has been refreshed with its current status.',
   'Ride is not active': ACCEPT_CONFLICTS['Ride is not active'],
 };
 const RIDE_CONFLICTS: Record<string, string> = {
   'Ride is not active': 'This ride is already cancelled or completed. Its status has been refreshed.',
+  // AST-016 (PR #12): completion is refused before the scheduled departure.
+  'Ride cannot be completed before its departure time': 'This ride can be marked completed only after its departure time.',
 };
 const CONCURRENT = 'Something changed at the same time (another action on this ride). The latest status has been loaded. Check it and try again.';
 const FORBIDDEN: Record<string, string> = {
