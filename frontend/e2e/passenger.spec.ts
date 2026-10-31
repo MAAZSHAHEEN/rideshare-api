@@ -363,9 +363,11 @@ test.describe('passenger journey (mocked API)', () => {
     await expect(page.getByRole('alert')).toHaveText(/Check your connection/);
     await page.getByRole('button', { name: 'Request a seat' }).click();
     await expect(page.getByText('Seat requested.')).toBeVisible();
+    // Since #24 the backend's CORS allows Idempotency-Key, so the header is sent cross-origin
+    // too unless VITE_SEND_IDEMPOTENCY_KEY=false (idempotencyHeaderEnabled).
     const sameOrigin = new URL(baseURL!).origin === new URL(apiOrigin).origin;
     expect(keys).toHaveLength(2);
-    if (sameOrigin) { expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/); expect(keys[1]).toBe(keys[0]); }
+    if (sameOrigin || process.env.VITE_SEND_IDEMPOTENCY_KEY !== 'false') { expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/); expect(keys[1]).toBe(keys[0]); }
     else expect(keys).toEqual([undefined, undefined]);
   });
 
@@ -409,12 +411,15 @@ test.describe('passenger journey (mocked API)', () => {
     await signIn(page, api);
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    // The first /me after the next load hangs, so the second reload lands mid-restore.
-    api.overrides.set('GET /me', async () => { api.overrides.delete('GET /me'); await gate; return { status: 200, body: fakeUser }; });
+    // Every /me hangs until released, so the second reload lands mid-restore. (A one-shot
+    // override was flaky: the dev build's StrictMode starts the restore twice and its first,
+    // immediately aborted request could consume the override.)
+    api.overrides.set('GET /me', async () => { await gate; return { status: 200, body: fakeUser }; });
     await page.goto('/passenger/bookings?status=pending');
     await expect(page.getByText('Restoring your session…')).toBeVisible();
     await page.reload();
     release();
+    api.overrides.delete('GET /me');
     await expect(page).toHaveURL('/passenger/bookings?status=pending');
     await expect(page.getByRole('heading', { level: 1, name: 'Your seat requests' })).toBeVisible();
     expect(await page.evaluate(() => sessionStorage.getItem('rideshare.session.v1'))).not.toBeNull();

@@ -75,8 +75,12 @@ test.describe('D-RC-1: device clock skew', () => {
     await expect(page).toHaveURL('/login');
     await expect(page.getByRole('status')).toHaveText('Your session has expired. Please sign in again.');
     expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
+    // One restore (the dev build's StrictMode may start it twice); nothing after that, no loop.
+    const settled = api.calls.me;
+    expect(settled).toBeGreaterThanOrEqual(1);
+    expect(settled).toBeLessThanOrEqual(2);
     await page.waitForTimeout(1500);
-    expect(api.calls.me).toBe(1);
+    expect(api.calls.me).toBe(settled);
   });
 });
 
@@ -97,8 +101,12 @@ test.describe('D-RC-2: API unreachable during a reload', () => {
     expect(await stored(page)).toBe(before);
     // No private data from before the reload, no redirect loop.
     await expect(page.getByRole('heading', { name: 'Your seat requests' })).toHaveCount(0);
+    // One restore attempt (the dev build's StrictMode may start it twice), then nothing: no loop.
+    const settled = downCalls;
+    expect(settled).toBeGreaterThanOrEqual(1);
+    expect(settled).toBeLessThanOrEqual(2);
     await page.waitForTimeout(1500);
-    expect(downCalls).toBe(1);
+    expect(downCalls).toBe(settled);
     await expect(page).toHaveURL('/passenger/bookings');
     const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']).analyze();
     await testInfo.attach('axe-restore-failed.json', { body: JSON.stringify(results.violations, null, 2), contentType: 'application/json' });
@@ -106,7 +114,7 @@ test.describe('D-RC-2: API unreachable during a reload', () => {
     await page.screenshot({ path: testInfo.outputPath('restore-failed.png'), fullPage: true });
     // A failed retry keeps the state.
     await page.getByRole('button', { name: 'Retry' }).click();
-    await expect.poll(() => downCalls).toBe(2);
+    await expect.poll(() => downCalls).toBe(settled + 1);
     await expect(page.getByRole('heading', { name: 'Can’t reach RideShare' })).toBeVisible();
     // The API comes back.
     api.handlers['/me'] = up;
