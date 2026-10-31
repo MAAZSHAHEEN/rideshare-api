@@ -352,27 +352,33 @@ companion had to create two accounts, and the driver saw two unrelated requests.
   first), then re-runs the downgrade. Chosen over silent remapping because the
   migration cannot know which loss is acceptable.
 
-### Frontend change (not in this PR; for the passenger/driver UI branches)
-- `frontend/src/api/types.ts`: add `seats_requested: number` to `Booking`,
-  `PassengerBooking`, `DriverBooking`.
-- `frontend/src/api/client.ts`: `bookRide(rideId, signal?, idempotencyKey?, seats = 1)`
-  sends `body: seats === 1 ? undefined : { seats }` (keeps the no-body request for 1 seat).
-- `pages/passenger/RideDetails.tsx`: seat selector (`<select>` or stepper,
-  label "Seats"), options `1..Math.min(ride.available_seats, 8)`, default 1,
-  hidden/disabled when `available_seats < 1`; fare line
-  `seats × fare_per_seat`; copy "Request N seat(s)". Changing the seat count
-  must **drop the pending idempotency key** for `book:${rideId}`
-  (scope e.g. `book:${rideId}:${seats}`), otherwise a retry with a new count is 422.
-  Map 409 `Not enough seats available` → "Only X seats are left — choose fewer
-  seats." and refetch the ride.
-- `pages/passenger/MyBookings.tsx`: show "N seats" on each booking card
-  (`seats_requested > 1`, or always).
-- `pages/driver/DriverRide.tsx` request list: show "N seats" per request; the
-  Accept button disabled with hint when `seats_requested > ride.available_seats`;
-  `driver/errors.ts` maps `Not enough seats available` → "This request needs
-  more seats than are left."
-- Tests: Vitest for the selector bounds (1..min(available,8)), body omitted for
-  1 seat, key scope change, the new 409 copy; one Playwright step booking 2 seats.
+### Frontend change (implemented on `feat/frontend-multi-seat`, stacked on #23 + #22)
+- `frontend/src/api/types.ts`: `seats_requested?: number` on `Booking`,
+  `PassengerBooking`, `DriverBooking` (optional so a pre-#22 server still
+  renders); read only through `seatsOf()` (missing/invalid → 1). `MAX_SEATS_PER_BOOKING = 8`.
+- `frontend/src/api/client.ts`: `bookRide(rideId, signal?, idempotencyKey?, seats = 1)`;
+  1 seat sends no body (the exact pre-multi-seat request), 2–8 send `{"seats": n}`.
+- `pages/passenger/RideDetails.tsx`: `<select>` labelled "Seats", options
+  `1..min(available_seats, 8)`, default 1, hidden when the ride can't be
+  requested; total `seats × fare_per_seat`; "Request N seats". Idempotency scope
+  `book:${rideId}:${seats}`: a retry of the same count reuses its key, a new
+  count gets a new key (no 422). 409 `Not enough seats available` → fixed copy
+  "Not enough seats are left for that many. Choose fewer seats and try again."
+  and the ride is refetched (the selector shrinks). 422 `At most N seats per
+  booking` → "You can request at most N seats at a time."
+- `pages/passenger/MyBookings.tsx`: "N seats" and the total fare on each card.
+- `pages/driver/DriverRide.tsx`: "N seats" per request; Accept disabled with a
+  visible reason (`aria-describedby`) when `seats_requested > available_seats`;
+  `driver/errors.ts` maps the 409 to "This request needs more seats than are left…".
+- **Idempotency-Key is now sent by default**, also from a split-origin dev
+  build: `main.py` CORS `allow_headers` = `Authorization, Content-Type,
+  Idempotency-Key` (exact list; the value is validated server-side, 1–64
+  visible ASCII) and `expose_headers` adds `Idempotent-Replayed` next to
+  `Retry-After, X-Total-Count`. `VITE_SEND_IDEMPOTENCY_KEY=false` opts a
+  split-origin build out when pointed at an older backend without the header.
+- Tests: Vitest `src/pages/multiSeat.test.tsx`; Playwright
+  `e2e/multi-seat.spec.ts` (mocked, axe, mobile) and `e2e/multi-seat-live.spec.ts`
+  (live 2-seat flow on a disposable backend).
 
 ---
 

@@ -301,15 +301,14 @@ test.describe('driver journey (mocked API)', () => {
     await expect.poll(() => api.countReads.length).toBe(1);
   });
 
-  test('accept/reject send Idempotency-Key only when same-origin (production bundle)', async ({ page, baseURL }) => {
+  test('accept/reject send Idempotency-Key same-origin and split-origin (CORS allows it since feat/frontend-multi-seat)', async ({ page }) => {
     const api = new MockDriverApi();
     await signIn(page, api);
     await page.goto('/driver/rides/7');
     await page.getByRole('button', { name: 'Accept request from Asha Test' }).click();
     await expect(page.getByText('1 seat left')).toBeVisible();
-    const sameOrigin = new URL(baseURL!).origin === new URL(apiOrigin).origin;
-    if (sameOrigin) expect(api.idempotencyKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
-    else expect(api.idempotencyKeys).toEqual([undefined]);
+    expect(api.idempotencyKeys).toHaveLength(1);
+    expect(api.idempotencyKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   test('departed ride: no accept, reject allowed, complete with confirm', async ({ page }) => {
