@@ -115,6 +115,10 @@ async def suspend_user(db: AsyncSession, admin: User, user_id: int) -> tuple[Use
             .order_by(Ride.id.asc()).with_for_update()
             .execution_options(populate_existing=True)
         )).all()}
+        # The lock wait can be long: judge departure and expiry at the time we
+        # proceed, like every other writer (BOOKING_LIFECYCLE.md §3). The id
+        # snapshot above used an earlier `now`, so it can only be a superset.
+        now = clock.utc_now()
 
     # Re-check under the locks: a ride may have departed, been cancelled or
     # completed while we waited.
