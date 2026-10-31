@@ -8,6 +8,7 @@ import asyncio
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ with patch.dict(os.environ, {
 }):
     import jwt
 
+    import clock
     import config
     from database import Base, get_db
     from main import app
@@ -660,6 +662,48 @@ class SuspensionRaceTests(SuspensionTestBase):
         self.assertEqual(effects.cancelled_ride_ids, [ride])
         self.assertEqual(effects.cancelled_booking_ids, [booking.id])
         self.assertEqual(await self.booking_status(booking.id), BookingStatus.cancelled)
+
+    async def test_suspension_waiting_on_ride_lock_rechecks_departure(self):
+        """Forced: a coordinator holds the ride lock; a suspension (driver, then passenger) is
+        confirmed waiting on it; the frozen clock moves to the departure instant; the lock is
+        released. A ride that departed while the suspension waited is a departed ride: it is
+        not cancelled and an accepted seat on it is not handed back (BOOKING_LIFECYCLE §3:
+        time guards are evaluated after the locks).
+
+        Regression test for the RC-stress product fix (75bec50, ported from
+        tests/test_concurrency_stress.py::SuspensionClockRaceTests): suspend_user captured
+        ``now`` before waiting for the ride locks, so it cancelled a ride (and handed back
+        accepted seats) that had departed while it waited."""
+        frozen = SimpleNamespace(now=datetime.now(timezone.utc).replace(microsecond=0))
+        patcher = patch.object(clock, "utc_now", lambda: frozen.now)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for target, driver, passenger in (("driver", "driver", "passenger"),
+                                          ("other_passenger", "other_driver", "other_passenger")):
+            departure = frozen.now + timedelta(hours=1)
+            frozen.now = departure - timedelta(seconds=1)
+            ride = await self.add_ride(driver=driver, seats=2, departure=departure)
+            held = await self.add_booking(ride, passenger=passenger, seats=2,
+                                          status=BookingStatus.accepted)
+            conn = await self.engine.connect()
+            trans = await conn.begin()
+            await conn.execute(text("SELECT 1 FROM rides WHERE id = :r FOR UPDATE"), {"r": ride})
+            suspension = asyncio.create_task(self.suspend(target))
+            self.assertTrue(await self.wait_until_blocked(suspension),
+                            "suspension did not wait for the ride lock")
+            frozen.now = departure
+            await trans.commit()
+            await conn.close()
+            response = await suspension
+            self.assertEqual(response.status_code, 200, response.text)
+            body = response.json()
+            self.assertEqual((await self.ride_state(ride), await self.booking_status(held)),
+                             ((RideStatus.active, 2), BookingStatus.accepted), target)
+            if target == driver:
+                self.assertEqual((body["cancelled_ride_ids"], body["departed_active_ride_ids"]),
+                                 ([], [ride]))
+            self.assertEqual(body["cancelled_booking_ids"], [])
+            frozen.now = departure + timedelta(hours=2)
 
     async def test_concurrent_suspensions_apply_once(self):
         async def attempt(actor):
