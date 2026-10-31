@@ -11,7 +11,9 @@ with patch.dict(os.environ, {
 }):
     from main import app
     from models import User, UserRole
-    from privacy import CNIC_FULLY_MASKED, PHONE_FULLY_MASKED, mask_cnic, mask_phone
+    from privacy import (
+        CNIC_FULLY_MASKED, EMAIL_FULLY_MASKED, PHONE_FULLY_MASKED, mask_cnic, mask_email, mask_phone,
+    )
     from verification import (
         DRIVER_NOT_VERIFIED_LABEL, DriverVerificationStatus, driver_verification_status,
         is_verified_driver,
@@ -20,6 +22,21 @@ with patch.dict(os.environ, {
 # Obviously fake values only.
 FAKE_CNIC = "12345-6789012-3"
 FAKE_PHONE = "+923001234567"
+
+
+class EmailMaskingTests(unittest.TestCase):
+    def test_only_first_character_and_domain_shown(self):
+        self.assertEqual(mask_email("ayesha.khan@example.com"), "a***@example.com")
+        self.assertEqual(mask_email("  Z@example.org "), "Z***@example.org")
+        self.assertNotIn("yesha", mask_email("ayesha.khan@example.com"))
+
+    def test_unrecognised_values_are_fully_masked(self):
+        for value in ("", "no-at-sign", "@example.com", "user@", "ü@example.com"):
+            with self.subTest(value=value):
+                self.assertEqual(mask_email(value), EMAIL_FULLY_MASKED)
+
+    def test_none_passes_through(self):
+        self.assertIsNone(mask_email(None))
 
 
 class CnicMaskingTests(unittest.TestCase):
