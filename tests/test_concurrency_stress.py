@@ -547,7 +547,12 @@ def serial_model(seats_a, start_a, order):
         try:
             if name == "accept":
                 target = a if start_a == B.pending else other
-                lifecycle.booking_target(target.status, "accept")
+                # Same guard as booking_service.respond_to_booking: with #17 (D7) a request the
+                # passenger withdrew on a still-active ride answers PASSENGER_WITHDREW.
+                if hasattr(lifecycle, "respond_target"):
+                    lifecycle.respond_target(target, ride, "accept")
+                else:
+                    lifecycle.booking_target(target.status, "accept")
                 lifecycle.require_ride_active(ride)
                 lifecycle.apply_booking_transition(ride, target, "accept")
             elif name == "pcancel":
@@ -729,7 +734,10 @@ class SuspensionRaceStressTests(StressBase):
             pending = await self.add_booking(ride, "p3", seats=2)
             result, _ = await self.run_case("p3", lambda g: self.op(
                 booking_service.respond_to_booking, "d1", pending, True, gate=g), suspend_first)
-            self.assertEqual(result, (409, lifecycle.ALREADY_RESPONDED) if suspend_first else (200, "ok"))
+            # The suspension cancels the request while the ride stays active; with #17 (D7) the
+            # accept then reports PASSENGER_WITHDREW (before #17: ALREADY_RESPONDED).
+            withdrawn = getattr(lifecycle, "PASSENGER_WITHDREW", lifecycle.ALREADY_RESPONDED)
+            self.assertEqual(result, (409, withdrawn) if suspend_first else (200, "ok"))
             self.assertEqual((await self.ride_state(ride), await self.booking_status(pending)),
                              ((R.active, 4), B.cancelled))
             self.outcomes[(tag, "passenger_vs_accept") + result] += 1
