@@ -9,6 +9,9 @@ from starlette.staticfiles import StaticFiles
 
 BUILD_DIRECTORY = Path(__file__).resolve().parent / "frontend" / "dist"
 CLIENT_PATHS = ("/login", "/register", "/passenger", "/driver", "/account")
+# Client-routed areas whose nested paths (e.g. /driver/rides/7) are SPA deep links.
+# Only these exact prefixes plus "/" are claimed; no API namespace starts with them.
+CLIENT_AREAS = ("/passenger", "/driver")
 REVALIDATE = {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
 
 
@@ -44,6 +47,10 @@ def register_frontend(app: FastAPI, directory: Path = BUILD_DIRECTORY) -> None:
     app.add_api_route("/", root, methods=["GET", "HEAD"], include_in_schema=False)
     for path in CLIENT_PATHS:
         app.add_api_route(path, html, methods=["GET", "HEAD"], include_in_schema=False)
+    for area in CLIENT_AREAS:
+        def deep_link(rest: str):
+            return html()
+        app.add_api_route(f"{area}/{{rest:path}}", deep_link, methods=["GET", "HEAD"], include_in_schema=False)
 
     # These two unhashed public files must revalidate, like index.html.
     def public_file(name: str):

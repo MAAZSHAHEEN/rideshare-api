@@ -56,15 +56,70 @@ $env:PLAYWRIGHT_CHANNEL = 'chrome'
 npm run test:e2e
 ```
 
-Browser tests start Vite at port 5183 and intercept API calls using contract
-fixtures. They do not create real accounts and are not a replacement for the
-backend PostgreSQL suite. Screenshots are saved under ignored `test-results/`.
-For manual integration, register a real test account against your local backend.
+Browser tests start Vite at port 5183 (override with `PLAYWRIGHT_DEV_PORT`) and
+intercept API calls using contract fixtures. Third-party requests (for example
+Google Fonts) are blocked so runs are offline and deterministic. They do not
+create real accounts and are not a replacement for the backend PostgreSQL suite.
+Screenshots are saved under ignored `test-results/`.
+
+- `e2e/foundation.spec.ts`, `e2e/smoke.spec.ts`: routes, navigation, login and
+  registration, 401/409/422/5xx/network failure states, 390x844 mobile layout.
+- `e2e/a11y.spec.ts`: axe-core WCAG A/AA scan of key pages; serious and critical
+  violations fail, every finding is attached to the report.
+- `e2e/passenger.spec.ts`: passenger journey (AST-023) against a stateful
+  in-browser mock: search filters, details, request a seat, every booking error
+  (401/403/404/409/422/429/5xx/network), My bookings grouping and cancel dialog,
+  session reload/return path, 390px layout and axe scans. Set
+  `PASSENGER_SCREENS_DIR=/abs/dir` to also capture review screenshots.
+- `e2e/driver.spec.ts`: driver journey (M3) against a stateful in-browser mock:
+  publish (client validation, server 422 mapping), my rides filters, incoming
+  requests, accept/reject, every accept 409 (departed, no seats, already
+  responded, concurrent) with re-fetch, 401/403/404/422/429/5xx/network, cancel
+  and complete dialogs, deep-link reloads, 390px layout and axe scans. Set
+  `DRIVER_SCREENS_DIR=/abs/dir` to capture review screenshots.
+- `e2e/driver-live.spec.ts`: opt-in M3 Definition of Done on a disposable backend:
+  a driver registers and publishes in the browser, two passengers (separate
+  browser contexts) request seats, the driver accepts one (seats drop) and
+  rejects the other.
+- `e2e/live-backend.spec.ts`, `e2e/passenger-live.spec.ts`: opt-in contract
+  checks against a local FastAPI serving `dist/` on a disposable database (the
+  passenger one seeds a ride as a driver through the API, then books and cancels
+  it in the browser). Skipped unless enabled:
+
+```sh
+npm run build    # then, from the repo root, with a disposable DATABASE_URL:
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:8000 PLAYWRIGHT_API_ORIGIN=http://127.0.0.1:8000 \
+  E2E_LIVE_BACKEND=1 npm run test:e2e
+```
+
+CI runs this exact mode (job `e2e` in `.github/workflows/ci.yml`). Use a system
+Chromium with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium` where the
+Playwright download is unavailable (for example linux-arm64). Never point
+`PLAYWRIGHT_BASE_URL` at a deployed environment.
 
 ## Scope and session policy
 
 - Landing, responsive navigation/footer, login and registration, separate
   passenger/driver layouts, read-only paginated history, and a read-only account.
+- Driver journey (M3): `/driver` (overview), `/driver/rides/new` (publish a
+  scheduled ride; departure entered in PKT and sent as ISO with `+05:00`),
+  `/driver/rides[?filter=upcoming|departed|completed|cancelled]`, and
+  `/driver/rides/<id>` (seat requests by status, accept/reject, cancel ride,
+  complete after departure). These are real paths: the backend serves
+  `index.html` for `/driver/*` and `/passenger/*` (`frontend_serving.CLIENT_AREAS`).
+  Client checks mirror the server's ride rules, but the API stays authoritative
+  for driver capability, ownership, seats and departure. No driver verification
+  exists, so the UI says "Driver documents not verified" and never "verified".
+- Passenger journey (AST-023): `/passenger?view=search` (from, to, date filters
+  in the URL), `/passenger?ride=<id>` (details + request a seat),
+  `/passenger?view=bookings[&status=…]` (grouped by status, cancel with
+  confirmation). Views use query parameters because the backend serves only the
+  exact `/passenger` client path (see `frontend_serving.CLIENT_PATHS`).
+  Departure times are always shown in Pakistan time (Asia/Karachi, "PKT"),
+  fares in PKR. The date filter is a PKT calendar day sent as
+  `departure_from`/`departure_before` with `+05:00`. Place names match exactly
+  (server behaviour).
 - Registration sends name, email, password, CNIC, phone number and initial role;
   both modes are included. It redirects to login. No token is assumed from registration.
 - Passwords are preserved exactly. New passwords require 12 Unicode characters,
@@ -82,18 +137,22 @@ For manual integration, register a real test account against your local backend.
   Separate query keys retain ride and booking history when changing modes.
   Guards respect server capabilities but are not security controls: the backend
   independently enforces capabilities, ownership, and no self-booking.
-- Tokens exist only in memory. Reloads and new tabs require login. Logout clears
-  credentials, aborts sign-in, cancels queries and clears the query cache. An old
-  request cannot invalidate a newer session. Logout does not revoke server JWTs.
+- The token is kept in this tab's `sessionStorage` (key `rideshare.session.v1`,
+  token and travel mode only) so a reload keeps the session; new tabs start
+  signed out. On reload it is re-verified with `GET /me` before anything is
+  shown. Logout, 401 and expiry clear it. See
+  [docs/frontend/SESSION_PERSISTENCE.md](../docs/frontend/SESSION_PERSISTENCE.md)
+  for the decision and XSS/CSRF trade-offs. Logout also aborts sign-in, cancels
+  queries and clears the query cache. An old request cannot invalidate a newer
+  session. Logout does not revoke server JWTs.
 - Authenticated 401s and expiry end the session. Protected route checks are UI
   controls; backend authorization remains authoritative.
 - Mutations are not retried automatically. Registration network/server failures
   explain that persistence may have occurred before the response failed.
 - History uses `/rides/me` or `/bookings/me`, limit 20 and offset pagination.
   Counts describe the displayed page, not lifetime totals. All history is shown;
-  active rides are not automatically called upcoming. Times use the browser's
-  timezone. Currency is intentionally not assumed.
-- No ride creation/booking decisions/cancellation UI in this foundation task.
+  active rides are not automatically called upcoming. Times are shown in PKT.
+- No ride creation or driver booking-decision UI yet (driver journey: Milestone 3).
   No fake trips, maps, ratings, payments, social login or admin console.
 
 Production output is `dist/`. FastAPI serves the explicit client routes and
@@ -106,7 +165,8 @@ external image dependency. Keep API/session values out of analytics and logs.
 
 ## Organization
 
-`src/api/` holds backend types, fetch and error handling; `src/auth/` owns memory
-sessions and password validation; `src/pages/` holds screens; `src/components/`
+`src/api/` holds backend types, fetch and error handling; `src/auth/` owns sessions
+(memory + tab `sessionStorage`) and password validation; `src/passenger/` holds
+time/fare formatting and error copy; `src/pages/passenger/` the passenger views; `src/pages/` holds screens; `src/components/`
 contains shared navigation/icons. Server state uses TanStack Query; form state
 stays local. Tests cover API contracts, session races, forms and browser layouts.
