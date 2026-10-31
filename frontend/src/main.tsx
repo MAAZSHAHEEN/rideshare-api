@@ -5,6 +5,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App } from './App';
 import { AuthProvider } from './auth/AuthProvider';
 import './styles.css';
+import './passenger.css';
+import './driver.css';
 
 const queryClient = new QueryClient({ defaultOptions: {
   queries: { retry: false, staleTime: 30_000, refetchOnWindowFocus: true },

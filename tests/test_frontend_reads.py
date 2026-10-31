@@ -22,6 +22,12 @@ with patch.dict(os.environ, {
     from routers.auth import create_access_token
 
 
+def shown_status(booking):
+    """Listing status since c1a7e0b00002: every seeded ride departed in 2020, so a
+    pending request on it reads as expired (lazy expiry, nothing is written)."""
+    return BookingStatus.expired if booking.status == BookingStatus.pending else booking.status
+
+
 @unittest.skipUnless(TEST_DATABASE_URL, "Set TEST_DATABASE_URL to a PostgreSQL test database")
 class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -158,9 +164,11 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
             for item in result:
                 self.assertEqual(item["ride_id"], item["ride"]["id"])
                 self.assertEqual(item["passenger_id"], self.users["passenger"].id)
-                self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "ride"})
+                # seats_requested: additive field from c1a7e0b00003 (deliberate contract update).
+                self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "seats_requested", "ride"})
+                self.assertEqual(item["seats_requested"], 1)
         for status in BookingStatus:
-            expected = [b.id for b in reversed(bookings) if b.status == status]
+            expected = [b.id for b in reversed(bookings) if shown_status(b) == status]
             result = await self.get("/bookings/me", status=status.value, limit=100)
             self.assertEqual([item["id"] for item in result], expected)
 
@@ -185,11 +193,13 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
             result = await self.get(path, "driver", **params)
             self.assertEqual([item["id"] for item in result], expected)
             for item in result:
-                self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "passenger"})
+                # seats_requested: additive field from c1a7e0b00003 (deliberate contract update).
+                self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "seats_requested", "passenger"})
+                self.assertEqual(item["seats_requested"], 1)
                 self.assertEqual(set(item["passenger"]), {"id", "name"})
                 self.assertEqual(item["passenger"]["id"], item["passenger_id"])
         for status in BookingStatus:
-            expected = [b.id for b in reversed(bookings) if b.status == status]
+            expected = [b.id for b in reversed(bookings) if shown_status(b) == status]
             result = await self.get(path, "driver", status=status.value, offset=0, limit=100)
             self.assertEqual([item["id"] for item in result], expected)
         # Historical ride states impose no search-style visibility cutoff.
@@ -248,7 +258,9 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
                 for row in requests:
                     self.assertEqual(set(row["passenger"]), {"id", "name"})
                 await self.request_as("PATCH", f'/bookings/{third["id"]}/respond', host, 200, params={"accept": True})
-                completed = await self.request_as("PATCH", f'/rides/{ride["id"]}/complete', host, 200)
+                # AST-016: completion only after departure (the ride departs in a day).
+                with patch("clock.utc_now", return_value=datetime.now(timezone.utc) + timedelta(days=2)):
+                    completed = await self.request_as("PATCH", f'/rides/{ride["id"]}/complete', host, 200)
                 self.assertEqual((completed["status"], completed["available_seats"]), ("completed", 1))
                 # Alternating views uses the same account and keeps terminal history.
                 for _ in range(2):

@@ -35,12 +35,27 @@ async def check():
             response = await client.get('/me', headers={'Origin': origin})
             assert response.status_code == 401
             assert response.headers['access-control-allow-origin'] == origin
+            # G6/G7: browsers may read Retry-After (429) and X-Total-Count (lists);
+            # #18: Idempotent-Replayed marks a replayed booking write.
+            exposed = {h.strip().lower() for h in response.headers['access-control-expose-headers'].split(',')}
+            assert exposed == {'retry-after', 'x-total-count', 'idempotent-replayed'}, exposed
+            # #18/#22 frontend: a cross-origin SPA may send Idempotency-Key on writes.
+            for method in ('POST', 'PATCH'):
+                preflight = await client.options('/bookings/1', headers={
+                    'Origin': origin, 'Access-Control-Request-Method': method,
+                    'Access-Control-Request-Headers': 'authorization,content-type,idempotency-key'})
+                assert preflight.status_code == 200, preflight.text
+                allowed = {h.strip().lower() for h in preflight.headers['access-control-allow-headers'].split(',')}
+                assert 'idempotency-key' in allowed, allowed
             assert response.headers['www-authenticate'] == 'Bearer'
         for origin, method, headers in (
             ('https://untrusted.example.com', 'GET', 'authorization'),
             ('http://localhost:5174', 'GET', 'authorization'),
             ('http://localhost:5173', 'DELETE', 'authorization'),
             ('http://localhost:5173', 'GET', 'x-unapproved-header'),
+            # The allowlist is exact: only Idempotency-Key was added.
+            ('http://localhost:5173', 'POST', 'idempotency-key,x-request-id'),
+            ('https://untrusted.example.com', 'POST', 'idempotency-key'),
         ):
             response = await client.options('/rides/', headers={
                 'Origin': origin, 'Access-Control-Request-Method': method,
