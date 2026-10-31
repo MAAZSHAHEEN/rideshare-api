@@ -974,6 +974,43 @@ class ClockRaceTests(StressBase):
         self.check_now = frozen.now
 
 
+class SuspensionClockRaceTests(StressBase):
+    async def test_suspension_waiting_on_ride_lock_rechecks_departure(self):
+        """Forced: a coordinator holds the ride lock; a suspension (driver, then passenger) is
+        confirmed waiting on it; the frozen clock moves to the departure instant; the lock is
+        released. A ride that departed while the suspension waited is a departed ride: it is
+        not cancelled and an accepted seat on it is not handed back (BOOKING_LIFECYCLE §3:
+        time guards are evaluated after the locks).
+
+        Regression test for the RC-stress product fix in services/accounts.py: suspend_user
+        captured ``now`` before waiting for the ride locks, so it cancelled a ride (and handed
+        back accepted seats) that had departed while it waited."""
+        t0 = datetime.now(timezone.utc).replace(microsecond=0)
+        frozen = self.freeze(t0)
+        for target, driver, passenger in (("d0", "d0", "p0"), ("p1", "d1", "p1")):
+            departure = frozen.now + timedelta(hours=1)
+            frozen.now = departure - timedelta(seconds=1)
+            ride = await self.add_ride(driver, seats=4, departure=departure)
+            held = await self.add_booking(ride, passenger, seats=2, status=B.accepted)
+            release = await self.held_lock("SELECT 1 FROM rides WHERE id = :r FOR UPDATE", {"r": ride})
+            suspension = asyncio.create_task(self.admin(admin_routes.suspend_user, target))
+            await self.wait_blocked(1, suspension)
+            frozen.now = departure
+            await self.mark_departed(ride)
+            await release()
+            response = await suspension
+            self.assertEqual(outcome(response), (200, "ok"))
+            self.assertEqual((await self.ride_state(ride), await self.booking_status(held)),
+                             ((R.active, 2), B.accepted), target)
+            if target == driver:
+                self.assertEqual((response.cancelled_ride_ids, response.departed_active_ride_ids),
+                                 ([], [ride]))
+            self.assertEqual(response.cancelled_booking_ids, [])
+            self.check_now = frozen.now
+            await self.assert_invariants()
+            frozen.now = departure + timedelta(hours=2)
+
+
 # =================================================================================================
 class JobConcurrencyTests(StressBase):
     async def test_expire_sweep_and_purge_twice_concurrently_forced(self):
