@@ -382,6 +382,26 @@ class MultiSeatApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((first.status_code, again.status_code), (201, 201))
         self.assertEqual(again.headers.get("Idempotent-Replayed"), "true")
 
+    async def test_key_stored_before_multiseat_still_replays_its_one_seat_retry(self):
+        # A key claimed by pre-c1a7e0b00003 code hashed {"ride_id"} only.
+        from models import IdempotencyKey
+        ride_id, (b1,) = await self.seed_ride(5, [(self.passenger, 1, B.pending)])
+        stored = {"id": b1, "ride_id": ride_id, "passenger_id": self.passenger.id, "status": "pending"}
+        now = datetime.now(timezone.utc)
+        async with AsyncSession(self.engine) as db:
+            db.add(IdempotencyKey(
+                user_id=self.passenger.id, key="pre-deploy", operation="booking.create",
+                request_hash=idempotency.fingerprint("booking.create", {"ride_id": ride_id}),
+                status_code=201, response_body=stored, created_at=now,
+                expires_at=now + timedelta(hours=1)))
+            await db.commit()
+        replay = await self.book(ride_id, key="pre-deploy")
+        self.assertEqual((replay.status_code, replay.json()), (201, stored))
+        self.assertEqual(replay.headers.get("Idempotent-Replayed"), "true")
+        other = await self.book(ride_id, {"seats": 2}, key="pre-deploy")
+        self.assertEqual(other.status_code, 422)
+        self.assertEqual(await self.booking_count(), 1)
+
     async def test_concurrent_same_key_accepts_debit_seats_once(self):
         ride_id, (b1,) = await self.seed_ride(5, [(self.passenger, 3, B.pending)])
         responses = await asyncio.gather(*(self.respond(b1, key="acc-1") for _ in range(6)))
