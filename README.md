@@ -156,8 +156,15 @@ returns 422 with an error list; existing departure/time-window checks return
 422 with a string detail. Successful response shapes are unchanged.
 
 Only the recognized duplicate-active-booking database constraint is translated
-to 409; unrelated database failures propagate normally. The `/test-db` diagnostic
-returns a generic 503 on connection failure without exposing exception text.
+to 409; unrelated database failures propagate normally.
+
+## Health checks
+
+`GET /healthz` is liveness (no database access, always `{"status":"ok"}`).
+`GET /readyz` is readiness: a bounded `SELECT 1` (and a Redis ping only when
+auth rate limiting is enabled), returning 200 or a generic 503 with no error
+details. The old `/test-db` diagnostic was removed and returns 404. See
+[docs/operations/HEALTH_CHECKS.md](docs/operations/HEALTH_CHECKS.md).
 
 ## Frontend read endpoints
 

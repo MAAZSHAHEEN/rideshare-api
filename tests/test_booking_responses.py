@@ -7,6 +7,7 @@ them. Teardown drops only that schema. App lifespan and migrations are not run.
 """
 
 import asyncio
+import json
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,6 @@ from uuid import uuid4
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, inspect, select, update
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -101,6 +101,23 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             transport=ASGITransport(app=app), base_url="http://testserver"
         )
         self.addAsyncCleanup(self.client.aclose)
+
+    async def assert_internal_error(self, request, exc_type, message=None, *,
+                                    sqlstate=None, constraint=None):
+        # Unhandled errors become a generic 500; the log carries only safe fields.
+        with self.assertLogs("rideshare.errors", "ERROR") as logs:
+            response = await request
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertEqual(response.json(), {"detail": "Internal server error"})
+        self.assertEqual(len(logs.records), 1)
+        record = json.loads(logs.records[0].getMessage())
+        self.assertEqual(record["exc_type"], exc_type)
+        self.assertEqual(record.get("sqlstate"), sqlstate)
+        self.assertEqual(record.get("constraint"), constraint)
+        self.assertIsNone(logs.records[0].exc_info)
+        if message:
+            self.assertNotIn(message, logs.output[0])
+        return response
 
     async def drop_schema(self):
         async with self.engine.begin() as connection:
@@ -371,8 +388,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("simulated commit failure")
 
         with patch.object(AsyncSession, "commit", fail_after_flush):
-            with self.assertRaisesRegex(RuntimeError, "simulated commit failure"):
-                await self.respond(self.booking_ids[0], True)
+            await self.assert_internal_error(self.respond(self.booking_ids[0], True), "builtins.RuntimeError", "simulated commit failure")
         self.assertEqual(await self.state(), before)
 
     async def test_active_booking_precheck_returns_conflict(self):
@@ -457,11 +473,11 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
 
         token = create_access_token(self.passenger.id, self.passenger.role)
         with patch.object(AsyncSession, "commit", invalid_commit):
-            with self.assertRaises(IntegrityError) as raised:
-                await self.client.post(
+            await self.assert_internal_error(
+                self.client.post(
                     f"/bookings/{self.ride_id}", headers={"Authorization": f"Bearer {token}"},
-                )
-        self.assertEqual(raised.exception.orig.sqlstate, "23514")
+                ), "sqlalchemy.exc.IntegrityError",
+                sqlstate="23514", constraint="ck_rides_available_seats_nonnegative")
         self.assertEqual(await self.state(), before)
 
     async def test_negative_ride_inputs_return_validation_errors(self):
@@ -627,8 +643,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(AsyncSession, "commit", fail_after_flush):
             with patch.object(AsyncSession, "rollback", record_rollback):
-                with self.assertRaisesRegex(RuntimeError, "simulated cancellation commit failure"):
-                    await self.cancel()
+                await self.assert_internal_error(self.cancel(), "builtins.RuntimeError", "simulated cancellation commit failure")
         self.assertEqual(len(rollbacks), 1)
         self.assertEqual(await self.state(), before)
 
@@ -642,9 +657,9 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             await session.execute(update(Ride).where(Ride.id == self.ride_id).values(fare_per_seat=-1))
 
         with patch.object(AsyncSession, "commit", invalid_commit):
-            with self.assertRaises(IntegrityError) as raised:
-                await self.cancel()
-        self.assertEqual(raised.exception.orig.sqlstate, "23514")
+            await self.assert_internal_error(
+                self.cancel(), "sqlalchemy.exc.IntegrityError",
+                sqlstate="23514", constraint="ck_rides_fare_per_seat_nonnegative")
         self.assertEqual(await self.state(), before)
 
     async def test_cancelled_booking_allows_rebooking_without_losing_history(self):
@@ -866,8 +881,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(AsyncSession, "commit", fail_after_flush):
             with patch.object(AsyncSession, "rollback", record_rollback):
-                with self.assertRaisesRegex(RuntimeError, "simulated ride cancellation commit failure"):
-                    await self.cancel_ride_request()
+                await self.assert_internal_error(self.cancel_ride_request(), "builtins.RuntimeError", "simulated ride cancellation commit failure")
         self.assertEqual(len(rollbacks), 1)
         self.assertEqual(await self.state(), before)
         async with AsyncSession(self.engine) as session:
@@ -882,9 +896,9 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             await session.execute(update(Ride).where(Ride.id == self.ride_id).values(fare_per_seat=-1))
 
         with patch.object(AsyncSession, "commit", invalid_commit):
-            with self.assertRaises(IntegrityError) as raised:
-                await self.cancel_ride_request()
-        self.assertEqual(raised.exception.orig.sqlstate, "23514")
+            await self.assert_internal_error(
+                self.cancel_ride_request(), "sqlalchemy.exc.IntegrityError",
+                sqlstate="23514", constraint="ck_rides_fare_per_seat_nonnegative")
         self.assertEqual(await self.state(), before)
         async with AsyncSession(self.engine) as session:
             self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
@@ -1114,8 +1128,7 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(AsyncSession, "commit", fail_after_flush):
             with patch.object(AsyncSession, "rollback", record_rollback):
-                with self.assertRaisesRegex(RuntimeError, "simulated completion commit failure"):
-                    await self.complete_ride_request()
+                await self.assert_internal_error(self.complete_ride_request(), "builtins.RuntimeError", "simulated completion commit failure")
         self.assertEqual(len(rollbacks), 1)
         self.assertEqual(await self.state(), before)
         async with AsyncSession(self.engine) as session:
@@ -1131,9 +1144,9 @@ class BookingResponseTests(unittest.IsolatedAsyncioTestCase):
             await session.execute(update(Ride).where(Ride.id == self.ride_id).values(fare_per_seat=-1))
 
         with patch.object(AsyncSession, "commit", invalid_commit):
-            with self.assertRaises(IntegrityError) as raised:
-                await self.complete_ride_request()
-        self.assertEqual(raised.exception.orig.sqlstate, "23514")
+            await self.assert_internal_error(
+                self.complete_ride_request(), "sqlalchemy.exc.IntegrityError",
+                sqlstate="23514", constraint="ck_rides_fare_per_seat_nonnegative")
         self.assertEqual(await self.state(), before)
         async with AsyncSession(self.engine) as session:
             self.assertEqual((await session.get(Ride, self.ride_id)).status, RideStatus.active)
