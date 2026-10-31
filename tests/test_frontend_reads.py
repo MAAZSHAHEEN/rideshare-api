@@ -22,6 +22,12 @@ with patch.dict(os.environ, {
     from routers.auth import create_access_token
 
 
+def shown_status(booking):
+    """Listing status since c1a7e0b00002: every seeded ride departed in 2020, so a
+    pending request on it reads as expired (lazy expiry, nothing is written)."""
+    return BookingStatus.expired if booking.status == BookingStatus.pending else booking.status
+
+
 @unittest.skipUnless(TEST_DATABASE_URL, "Set TEST_DATABASE_URL to a PostgreSQL test database")
 class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -160,7 +166,7 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(item["passenger_id"], self.users["passenger"].id)
                 self.assertEqual(set(item), {"id", "ride_id", "passenger_id", "status", "ride"})
         for status in BookingStatus:
-            expected = [b.id for b in reversed(bookings) if b.status == status]
+            expected = [b.id for b in reversed(bookings) if shown_status(b) == status]
             result = await self.get("/bookings/me", status=status.value, limit=100)
             self.assertEqual([item["id"] for item in result], expected)
 
@@ -189,7 +195,7 @@ class FrontendReadTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(set(item["passenger"]), {"id", "name"})
                 self.assertEqual(item["passenger"]["id"], item["passenger_id"])
         for status in BookingStatus:
-            expected = [b.id for b in reversed(bookings) if b.status == status]
+            expected = [b.id for b in reversed(bookings) if shown_status(b) == status]
             result = await self.get(path, "driver", status=status.value, offset=0, limit=100)
             self.assertEqual([item["id"] for item in result], expected)
         # Historical ride states impose no search-style visibility cutoff.
