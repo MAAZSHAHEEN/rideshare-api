@@ -61,3 +61,7 @@
 .dialog .notice{margin:14px 0 0}
 @media(min-width:640px){.search-fields{grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.search-actions .button{flex:0 0 auto}.ride-card{flex-direction:row;align-items:center;justify-content:space-between;padding:18px 22px}.ride-card-main{flex:1}.detail-facts>div{grid-template-columns:170px 1fr;align-items:center}.dialog-backdrop{align-items:center}.dialog-actions{flex-direction:row;justify-content:flex-end}.view-heading h1{font-size:2rem}}
 .status-pill.expired{background:#f1f2f5;color:#4f5664}
+/* Multi-seat selector (#22 §3). */
+.seat-field{margin-bottom:10px;max-width:220px}.seat-field select{display:block;width:100%;border:1px solid #d9e2ed;border-radius:8px;padding:10px 12px;min-height:46px;color:var(--ink);background:#fff;font-size:.85rem}.seat-field select:hover{border-color:#a7b9d3}.seat-field select:focus-visible{outline:3px solid #2584e8;outline-offset:2px;border-color:var(--blue)}.seat-field select:disabled{background:#f6f8fc}
+.seat-total{font-size:.82rem;margin:0 0 14px;color:#34485f}.seat-total strong{color:var(--ink)}
+.seat-count{font-weight:600}

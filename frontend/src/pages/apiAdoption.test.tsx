@@ -330,7 +330,7 @@ describe('Idempotency-Key on request-seat and accept/reject (PR #18 tolerance)',
     expect(calls[2].key).not.toBe(calls[0].key);
   });
 
-  it('a split-origin dev build does not send the header unless the flag is set (CORS allow_headers on this stack)', async () => {
+  it('a split-origin dev build sends the header by default (main.py CORS allows Idempotency-Key)', async () => {
     const keys: (string | undefined)[] = [];
     renderPassenger('/passenger/rides/7', {
       'GET /rides/7': () => json(upcoming()),
@@ -339,6 +339,7 @@ describe('Idempotency-Key on request-seat and accept/reject (PR #18 tolerance)',
     });
     await userEvent.click(await screen.findByRole('button', { name: /Request a seat/ }));
     expect(await screen.findByText('Seat requested.')).toBeInTheDocument();
-    expect(keys).toEqual([undefined]);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

@@ -8,6 +8,8 @@ export type DriverAction = 'create' | 'load-rides' | 'load-ride' | 'load-request
 // PR #2's departure guard). Anything else gets generic copy: server text is never shown raw.
 const ACCEPT_CONFLICTS: Record<string, string> = {
   'No seats available': 'No seats are left on this ride, so this request can’t be accepted. Requests and seats have been refreshed.',
+  // c1a7e0b00003: some seats remain, but fewer than this request needs.
+  'Not enough seats available': 'This request needs more seats than are left, so it can’t be accepted. Requests and seats have been refreshed.',
   'Ride has already departed': 'This ride has already departed, so requests can no longer be accepted.',
   // The server still sends this for accepted/rejected requests and for requests cancelled with their ride.
   'Booking already responded to': 'This request was already answered. The list has been refreshed with its current status.',

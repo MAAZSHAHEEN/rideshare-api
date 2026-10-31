@@ -3,12 +3,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { ApiError } from '../../api/client';
 import { useIdempotencyKeys } from '../../api/idempotency';
+import { seatCountLabel, seatsOf } from '../../api/types';
 import type { DriverBooking, Ride } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { driverErrorMessage } from '../../driver/errors';
 import type { DriverAction } from '../../driver/errors';
-import { BOOKING_HELP, BOOKING_LABELS, BOOKING_ORDER, FILTER_LABELS, acceptBlockedReason, canCancelRide, canCompleteRide, canReject, rideFilterOf } from '../../driver/state';
+import { BOOKING_HELP, BOOKING_LABELS, BOOKING_ORDER, FILTER_LABELS, acceptBlockedReason, acceptSeatShortfall, canCancelRide, canCompleteRide, canReject, rideFilterOf } from '../../driver/state';
 import { formatDeparture, formatFare, seatsLabel } from '../../passenger/time';
 import { useDriverView } from '../../driver/useDriverView';
 import { useRideBookingCounts } from '../../driver/useRideBookingCounts';
@@ -70,7 +71,8 @@ export function DriverRide({ rideId }: { rideId: number }) {
     onSettled: (_, reason, { booking, accept }) => idempotency.settle(respondScope(booking, accept), reason ?? undefined),
     onSuccess: (_, { booking, accept }) => {
       setConfirm(null);
-      setNotice(accept ? `Accepted ${booking.passenger.name}’s request. One seat is now taken.` : `Rejected ${booking.passenger.name}’s request.`);
+      const seats = seatsOf(booking);
+      setNotice(accept ? `Accepted ${booking.passenger.name}’s request. ${seats === 1 ? 'One seat is' : `${seats} seats are`} now taken.` : `Rejected ${booking.passenger.name}’s request.`);
       refresh();
     },
     onError: (reason, { accept }) => failed(reason, accept ? 'accept' : 'reject', !accept),
@@ -91,6 +93,7 @@ export function DriverRide({ rideId }: { rideId: number }) {
     if (busy) return;
     const blocked = acceptBlockedReason(current, Date.now());
     if (blocked) { setNow(Date.now()); setNotice(''); setError(blocked); return; }
+    if (acceptSeatShortfall(booking, current)) return; // the button is disabled with the reason beside it
     respond.mutate({ booking, accept: true });
   }
 
@@ -148,21 +151,22 @@ export function DriverRide({ rideId }: { rideId: number }) {
         : <div className="booking-groups">{groups.map(([group, items]) => <section key={group} className="booking-group" aria-labelledby={`requests-${group}`}>
           <h3 id={`requests-${group}`}>{BOOKING_LABELS[group]} <span className="group-count">({items.length})</span></h3>
           <p className="group-help">{BOOKING_HELP[group]}</p>
-          <ul className="ride-list">{items.map(booking => <li key={booking.id}><article className="ride-card request-card" aria-labelledby={`request-${booking.id}`}>
+          <ul className="ride-list">{items.map(booking => { const shortfall = booking.status === 'pending' && !blocked ? acceptSeatShortfall(booking, data) : null; return <li key={booking.id}><article className="ride-card request-card" aria-labelledby={`request-${booking.id}`}>
             <div className="ride-card-main"><h4 id={`request-${booking.id}`}>{booking.passenger.name}</h4>
-              <dl className="ride-facts"><div><dt>Request</dt><dd><span className={`status-pill ${booking.status}`}>{booking.status}</span></dd></div><div><dt>Seats</dt><dd>1</dd></div></dl></div>
+              <dl className="ride-facts"><div><dt>Request</dt><dd><span className={`status-pill ${booking.status}`}>{booking.status}</span></dd></div><div><dt>Seats</dt><dd className="seat-count">{seatCountLabel(seatsOf(booking))}</dd></div></dl>
+              {shortfall && <p className="field-help seat-shortfall" id={`shortfall-${booking.id}`}>{shortfall}</p>}</div>
             {booking.status === 'pending' && <div className="card-actions">
-              {!blocked && <button className="button small" type="button" disabled={busy} onClick={() => accept(booking, data)} aria-label={`Accept request from ${booking.passenger.name}`}>{respond.isPending && respond.variables?.booking.id === booking.id && respond.variables.accept ? 'Accepting…' : 'Accept'}</button>}
+              {!blocked && <button className="button small" type="button" disabled={busy || shortfall !== null} onClick={() => accept(booking, data)} aria-label={`Accept request from ${booking.passenger.name}`} aria-describedby={shortfall ? `shortfall-${booking.id}` : undefined}>{respond.isPending && respond.variables?.booking.id === booking.id && respond.variables.accept ? 'Accepting…' : 'Accept'}</button>}
               {canReject(data) && <button className="button button-outline small danger-outline" type="button" disabled={busy} onClick={() => { setDialogError(''); setConfirm({ kind: 'reject', booking }); }} aria-label={`Reject request from ${booking.passenger.name}`}>Reject</button>}
             </div>}
-          </article></li>)}</ul>
+          </article></li>; })}</ul>
         </section>)}</div>}
       {list.length > 0 && (requestTotal !== null ? requestTotal > list.length : list.length >= REQUESTS_LIMIT) && <p className="field-help panel-footnote">Showing the newest {list.length} of {requestTotal ?? `${REQUESTS_LIMIT}+`} requests.</p>}
     </section>
 
     {confirm?.kind === 'reject' && <ConfirmDialog title="Reject this request?" confirmLabel="Reject request" cancelLabel="Keep request" busy={busy} error={dialogError}
       onCancel={() => { if (!busy) setConfirm(null); }} onConfirm={() => respond.mutate({ booking: confirm.booking, accept: false })}>
-      <p>{confirm.booking.passenger.name} asked for a seat on {data.origin} → {data.destination}, {formatDeparture(data.departure_time)}.</p>
+      <p>{confirm.booking.passenger.name} asked for {seatsOf(confirm.booking) === 1 ? 'a seat' : seatCountLabel(seatsOf(confirm.booking))} on {data.origin} → {data.destination}, {formatDeparture(data.departure_time)}.</p>
       <p>They’ll see the request as rejected. This can’t be undone.</p>
     </ConfirmDialog>}
     {confirm?.kind === 'cancel-ride' && <ConfirmDialog title="Cancel this ride?" confirmLabel="Cancel ride" cancelLabel="Keep ride" busy={busy} error={dialogError}

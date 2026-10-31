@@ -3,6 +3,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError } from '../../api/client';
 import { hasNextPage } from '../../api/client';
+import { seatCountLabel, seatsOf } from '../../api/types';
 import type { BookingStatus, PassengerBooking } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -131,7 +132,7 @@ export function MyBookings() {
     {target && <ConfirmDialog title="Cancel this booking?" confirmLabel="Cancel booking" cancelLabel="Keep booking" busy={cancel.isPending} error={dialogError}
       onCancel={() => { if (!cancel.isPending) setTarget(null); }} onConfirm={() => cancel.mutate(target)}>
       <p>{target.ride.origin} → {target.ride.destination}, {formatDeparture(target.ride.departure_time)}.</p>
-      <p>{target.status === 'accepted' ? 'Your confirmed seat will be released for other passengers.' : 'Your request will be withdrawn.'} This can’t be undone.</p>
+      <p>{target.status === 'accepted' ? (seatsOf(target) === 1 ? 'Your confirmed seat will be released for other passengers.' : `Your ${seatsOf(target)} confirmed seats will be released for other passengers.`) : 'Your request will be withdrawn.'} This can’t be undone.</p>
     </ConfirmDialog>}
   </div>;
 }
@@ -147,11 +148,12 @@ export function pageSummary(offset: number, count: number, total: number): strin
 function BookingCard({ booking, now, onCancel }: { booking: PassengerBooking; now: number; onCancel: () => void }) {
   const { ride } = booking;
   const state = rideState(booking, now);
+  const seats = seatsOf(booking);
   return <article className="ride-card" aria-labelledby={`booking-${booking.id}-title`}>
     <div className="ride-card-main">
       <h4 id={`booking-${booking.id}-title`}>{ride.origin} <span aria-label="to">→</span> {ride.destination}</h4>
       <p className="ride-time"><Icon name="clock" size={14} /><time dateTime={ride.departure_time}>{formatDeparture(ride.departure_time)}</time></p>
-      <dl className="ride-facts"><div><dt>Booking</dt><dd><span className={`status-pill ${booking.status}`}>{booking.status}</span></dd></div><div><dt>Ride</dt><dd><span className={`status-pill ${state.tone}`}>{state.label}</span></dd></div><div><dt>Fare</dt><dd>{formatFare(ride.fare_per_seat)}</dd></div></dl>
+      <dl className="ride-facts"><div><dt>Booking</dt><dd><span className={`status-pill ${booking.status}`}>{booking.status}</span></dd></div><div><dt>Ride</dt><dd><span className={`status-pill ${state.tone}`}>{state.label}</span></dd></div><div><dt>Seats</dt><dd className="seat-count">{seatCountLabel(seats)}</dd></div><div><dt>Fare</dt><dd>{seats === 1 ? formatFare(ride.fare_per_seat) : <>{formatFare(seats * ride.fare_per_seat)} <span>({seats} × {formatFare(ride.fare_per_seat)})</span></>}</dd></div></dl>
     </div>
     <div className="card-actions">
       <Link className="button button-outline small" to={`/passenger/rides/${ride.id}`} aria-label={`Details: ${ride.origin} to ${ride.destination}, ${formatDeparture(ride.departure_time)}`}>Details</Link>

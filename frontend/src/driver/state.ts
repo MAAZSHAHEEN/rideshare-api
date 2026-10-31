@@ -1,4 +1,5 @@
-import type { BookingStatus, Ride, RideBookingCounts } from '../api/types';
+import type { BookingStatus, DriverBooking, Ride, RideBookingCounts } from '../api/types';
+import { seatsOf } from '../api/types';
 import { hasDeparted } from '../passenger/time';
 
 // Derived ride states for the driver UI. "Departed" is not stored by the API
@@ -19,6 +20,19 @@ export function acceptBlockedReason(ride: Ride, now = Date.now()): string | null
   if (hasDeparted(ride.departure_time, now)) return 'This ride has departed, so requests can no longer be accepted.';
   if (ride.available_seats < 1) return 'No seats left. Reject requests or cancel the ride; accepting would overbook it.';
   return null;
+}
+
+/**
+ * Why this one request can't be accepted although the ride takes requests:
+ * it needs more seats than are left (c1a7e0b00003; the server answers 409
+ * "Not enough seats available"). Null when it fits, or when the ride-level
+ * reason (full, departed, inactive) already applies.
+ */
+export function acceptSeatShortfall(booking: Pick<DriverBooking, 'seats_requested'>, ride: Ride): string | null {
+  const needed = seatsOf(booking);
+  const left = ride.available_seats;
+  if (left < 1 || needed <= left) return null;
+  return `Needs ${needed} seats, but only ${left} ${left === 1 ? 'is' : 'are'} left. Reject it, or wait until seats free up.`;
 }
 
 /** Rejecting stays allowed after departure (AST-001); only an inactive ride blocks it. */

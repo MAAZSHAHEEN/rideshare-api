@@ -1,4 +1,5 @@
 import type { Booking, BookingStatus, DriverBooking, LoginInput, Page, PassengerBooking, RegisterInput, Ride, RideBookingCounts, RideCreateInput, RideSearch, RideStatus, RideWhen, SortOrder, Token, User } from './types';
+import { MAX_SEATS_PER_BOOKING } from './types';
 
 export class ApiError extends Error {
   /**
@@ -63,15 +64,16 @@ export interface Credentials { token: string | null; generation: number }
 export const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,64}$/;
 
 /**
- * Whether to send `Idempotency-Key` (PR #18). Same-origin requests (every
- * production bundle served by FastAPI) involve no CORS, so the header is always
- * safe there; servers without #18 ignore it. A split-origin dev build only sends
- * it when VITE_SEND_IDEMPOTENCY_KEY=true, because the CORS allow_headers on this
- * stack (main.py: Authorization, Content-Type) would fail the preflight until #18
- * adds Idempotency-Key to it.
+ * Whether to send `Idempotency-Key` (PR #18). On by default: same-origin
+ * requests (every production bundle served by FastAPI) involve no CORS, and
+ * from feat/frontend-multi-seat on, main.py's CORS allow_headers includes
+ * Idempotency-Key, so a split-origin dev build passes the preflight too.
+ * VITE_SEND_IDEMPOTENCY_KEY=false opts a split-origin build out, for pointing
+ * it at an older backend whose CORS still allows only Authorization and
+ * Content-Type (that preflight would fail every write). Same-origin always sends.
  */
 export function idempotencyHeaderEnabled(base: string, flag: string | undefined = import.meta.env.VITE_SEND_IDEMPOTENCY_KEY): boolean {
-  return base === '' || flag === 'true';
+  return base === '' || flag !== 'false';
 }
 
 export function createApiClient(
@@ -146,8 +148,12 @@ export function createApiClient(
     searchRides: async (search: RideSearch, signal?: AbortSignal) => (await searchRidesPage(search, signal)).items,
     searchRidesPage,
     getRide: async (rideId: number, signal?: AbortSignal) => request<Ride>(`/rides/${positiveId(rideId)}`, { signal }),
-    /** `idempotencyKey`: one per user action, reused when that action is retried (PR #18 replays the first result). */
-    bookRide: async (rideId: number, signal?: AbortSignal, idempotencyKey?: string) => request<Booking>(`/bookings/${positiveId(rideId)}`, { method: 'POST', signal, idempotencyKey }),
+    /**
+     * `idempotencyKey`: one per user action, reused when that action is retried (PR #18 replays the first result).
+     * `seats` (c1a7e0b00003): 1 sends no body, exactly the pre-multi-seat request; 2–8 send `{"seats": n}`.
+     */
+    bookRide: async (rideId: number, signal?: AbortSignal, idempotencyKey?: string, seats = 1) =>
+      request<Booking>(`/bookings/${positiveId(rideId)}`, { method: 'POST', signal, idempotencyKey, body: seats === 1 ? undefined : { seats: seatCount(seats) } }),
     cancelBooking: async (bookingId: number, signal?: AbortSignal) => request<Booking>(`/bookings/${positiveId(bookingId)}/cancel`, { method: 'PATCH', signal }),
     // Driver journey (M3). The server enforces driver capability and ownership on every call.
     createRide: (input: RideCreateInput, signal?: AbortSignal) => request<Ride>('/rides/', { method: 'POST', body: input, signal }),
@@ -173,6 +179,12 @@ export function createApiClient(
   };
 }
 export type ApiClient = ReturnType<typeof createApiClient>;
+
+/** A seat count the server accepts (1–MAX_SEATS_PER_BOOKING); anything else is a programming error, never sent. */
+function seatCount(seats: number): number {
+  if (!Number.isSafeInteger(seats) || seats < 1 || seats > MAX_SEATS_PER_BOOKING) throw new Error('Invalid seat count');
+  return seats;
+}
 
 /** The server accepts 1–100 ride ids per booking-counts request. */
 export const BOOKING_COUNTS_MAX = 100;

@@ -23,12 +23,13 @@ describe('idempotency keys (PR #18 tolerance)', () => {
     for (const status of [400, 401, 403, 404, 409, 422]) expect(isRetryableFailure(new ApiError(status, 'x'))).toBe(false);
     expect(isRetryableFailure(new TypeError('boom'))).toBe(true);
   });
-  it('the header is enabled same-origin, or cross-origin only with the flag', () => {
+  it('the header is on by default (CORS allows it since feat/frontend-multi-seat); only an explicit false opts a split-origin build out', () => {
     expect(idempotencyHeaderEnabled('', undefined)).toBe(true);
-    expect(idempotencyHeaderEnabled('http://localhost:8000', undefined)).toBe(false);
-    expect(idempotencyHeaderEnabled('http://localhost:8000', 'false')).toBe(false);
-    expect(idempotencyHeaderEnabled('http://localhost:8000', '1')).toBe(false);
+    expect(idempotencyHeaderEnabled('', 'false')).toBe(true); // same origin: no CORS, always safe
+    expect(idempotencyHeaderEnabled('http://localhost:8000', undefined)).toBe(true);
+    expect(idempotencyHeaderEnabled('http://localhost:8000', '1')).toBe(true);
     expect(idempotencyHeaderEnabled('http://localhost:8000', 'true')).toBe(true);
+    expect(idempotencyHeaderEnabled('http://localhost:8000', 'false')).toBe(false);
   });
   it('sends the key only on the two mutations, and never an invalid key', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
@@ -43,9 +44,12 @@ describe('idempotency keys (PR #18 tolerance)', () => {
     expect(headers).toEqual(['k-1', 'k-2', undefined, undefined, undefined, undefined]);
     expect(IDEMPOTENCY_KEY.test('x'.repeat(64))).toBe(true);
   });
-  it('a client without the option (split-origin dev default) never sends it', async () => {
+  it('a split-origin client sends it by default and never when opted out', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response('{}'))));
     await createApiClient(() => ({ token: 't', generation: 1 }), vi.fn(), 'http://localhost:8000').bookRide(7, undefined, 'k-1');
-    expect((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].headers).not.toHaveProperty('Idempotency-Key');
+    await createApiClient(() => ({ token: 't', generation: 1 }), vi.fn(), 'http://localhost:8000', { idempotencyKeys: false }).bookRide(7, undefined, 'k-2');
+    const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][1].headers['Idempotency-Key']).toBe('k-1');
+    expect(calls[1][1].headers).not.toHaveProperty('Idempotency-Key');
   });
 });

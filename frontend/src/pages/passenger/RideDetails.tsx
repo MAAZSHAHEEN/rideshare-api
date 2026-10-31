@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { ApiError } from '../../api/client';
 import { useIdempotencyKeys } from '../../api/idempotency';
+import { MAX_SEATS_PER_BOOKING, seatCountLabel, seatsOf } from '../../api/types';
 import type { Booking, PassengerBooking, Ride } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { Icon } from '../../components/Icon';
@@ -20,6 +21,20 @@ export function unavailableReason(ride: Ride, now = Date.now()): string | null {
 }
 
 export const MY_RIDE_BOOKINGS_LIMIT = 5;
+
+/** Largest seat count the selector offers: what is left, capped at the server's per-booking maximum (0 when full). */
+export function maxSelectableSeats(ride: Pick<Ride, 'available_seats'>): number {
+  return Math.max(0, Math.min(ride.available_seats, MAX_SEATS_PER_BOOKING));
+}
+
+/**
+ * Idempotency scope for one "request seats" action. The seat count is part of
+ * it: PR #22 fingerprints `seats`, so retrying a failed 2-seat request after
+ * switching to 3 must use a fresh key (reusing it would be a 422).
+ */
+export function bookScope(rideId: number, seats: number): string {
+  return `book:${rideId}:${seats}`;
+}
 
 /** The caller's live (pending or accepted) booking for this ride, if the lookup returned one. */
 export function liveBookingFor(bookings: PassengerBooking[] | undefined, rideId: number): PassengerBooking | undefined {
@@ -44,6 +59,7 @@ export function RideDetails({ rideId }: { rideId: number }) {
   const [now, setNow] = useState(() => Date.now());
   const [created, setCreated] = useState<Booking | null>(null);
   const [error, setError] = useState('');
+  const [seatChoice, setSeatChoice] = useState(1);
   const errorRef = useRef<HTMLDivElement>(null);
   const successRef = useRef<HTMLDivElement>(null);
   usePassengerView('Ride details', 'ride-heading');
@@ -62,13 +78,16 @@ export function RideDetails({ rideId }: { rideId: number }) {
   });
   const existing = liveBookingFor(mine.data, rideId);
 
+  // A refetch can lower what is left; never offer or send more than that.
+  const maxSeats = ride.data ? maxSelectableSeats(ride.data) : 0;
+  const seats = Math.max(1, Math.min(seatChoice, maxSeats));
+
   const idempotency = useIdempotencyKeys();
-  const bookScope = `book:${rideId}`;
   const book = useMutation({
     // The same key is reused if this request is retried after a network/429/5xx failure (PR #18).
-    mutationFn: (key: string) => api.bookRide(rideId, undefined, key),
+    mutationFn: ({ key, seats }: { key: string; seats: number }) => api.bookRide(rideId, undefined, key, seats),
     onMutate: () => { setError(''); setCreated(null); },
-    onSettled: (_, reason) => idempotency.settle(bookScope, reason ?? undefined),
+    onSettled: (_, reason, { seats }) => idempotency.settle(bookScope(rideId, seats), reason ?? undefined),
     onSuccess: booking => {
       setCreated(booking);
       void queryClient.invalidateQueries({ queryKey: ['my-bookings'] });
@@ -89,7 +108,7 @@ export function RideDetails({ rideId }: { rideId: number }) {
     if (book.isPending || !ride.data) return;
     const reason = unavailableReason(ride.data, Date.now());
     if (reason) { setNow(Date.now()); setError(reason); return; }
-    book.mutate(idempotency.keyFor(bookScope));
+    book.mutate({ key: idempotency.keyFor(bookScope(rideId, seats)), seats });
   }
 
   const heading = <h1 id="ride-heading" tabIndex={-1}>{ride.data ? <>{ride.data.origin} <span aria-label="to">→</span> {ride.data.destination}</> : 'Ride details'}</h1>;
@@ -104,6 +123,7 @@ export function RideDetails({ rideId }: { rideId: number }) {
   const departed = hasDeparted(data.departure_time, now);
   const reason = unavailableReason(data, now);
   const current = created ?? existing;
+  const currentSeats = current ? seatsOf(current) : 1;
   return <div className="passenger-view">
     <Link className="back-link" to={back}>← Back to search</Link>
     <div className="view-heading"><span className="eyebrow">RIDE DETAILS</span>{heading}<p><time dateTime={data.departure_time}>{formatDeparture(data.departure_time)}</time></p></div>
@@ -115,13 +135,23 @@ export function RideDetails({ rideId }: { rideId: number }) {
         <div><dt>Ride status</dt><dd><span className={`status-pill ${data.status}`}>{data.status}</span></dd></div>
       </dl>
       <div className="booking-box">
-        {created ? <div className="notice success" role="status" tabIndex={-1} ref={successRef}><strong>Seat requested.</strong> Your booking is <span className="status-pill pending">pending</span> until the driver accepts or rejects it. <Link to="/passenger/bookings">View my bookings</Link></div>
-          : current ? <div className="notice" role="status">You’ve already requested a seat on this ride. Status: <span className={`status-pill ${current.status}`}>{current.status}</span> <Link to="/passenger/bookings">Manage in My bookings</Link></div>
+        {created ? <div className="notice success" role="status" tabIndex={-1} ref={successRef}><strong>{currentSeats === 1 ? 'Seat requested.' : `${currentSeats} seats requested.`}</strong> Your booking is <span className="status-pill pending">pending</span> until the driver accepts or rejects it. <Link to="/passenger/bookings">View my bookings</Link></div>
+          : current ? <div className="notice" role="status">You’ve already requested {currentSeats === 1 ? 'a seat' : `${currentSeats} seats`} on this ride. Status: <span className={`status-pill ${current.status}`}>{current.status}</span> <Link to="/passenger/bookings">Manage in My bookings</Link></div>
           : reason ? <div className="notice" role="status"><strong>Not available to book.</strong> {reason}</div>
-          : <p className="booking-hint">Request one seat. The driver decides whether to accept. You can cancel from My bookings.</p>}
+          : <>
+            <p className="booking-hint" id="seat-hint">Choose how many seats you need. The driver accepts or rejects the whole request. You can cancel from My bookings.</p>
+            <div className="field seat-field">
+              <label htmlFor="seat-count">Seats</label>
+              <select id="seat-count" value={seats} aria-describedby="seat-hint seat-total" disabled={book.isPending}
+                onChange={event => { setSeatChoice(Number(event.target.value)); setError(''); }}>
+                {Array.from({ length: maxSeats }, (_, i) => i + 1).map(n => <option key={n} value={n}>{seatCountLabel(n)}</option>)}
+              </select>
+            </div>
+            <p className="seat-total" id="seat-total" aria-live="polite">Total <strong>{formatFare(seats * data.fare_per_seat)}</strong>{seats > 1 && <> for {seatCountLabel(seats)} ({formatFare(data.fare_per_seat)} each)</>}</p>
+          </>}
         {error && <div className="notice error" role="alert" tabIndex={-1} ref={errorRef}>{error}</div>}
         {!created && !current && !reason && <button className="button full-width" onClick={request} disabled={book.isPending}>
-          {book.isPending ? <><span className="spinner" aria-hidden="true" />Requesting seat…</> : <>Request a seat <Icon name="arrow" size={17} /></>}
+          {book.isPending ? <><span className="spinner" aria-hidden="true" />{seats === 1 ? 'Requesting seat…' : 'Requesting seats…'}</> : <>{seats === 1 ? 'Request a seat' : `Request ${seatCountLabel(seats)}`} <Icon name="arrow" size={17} /></>}
         </button>}
       </div>
     </section>

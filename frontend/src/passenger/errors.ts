@@ -6,6 +6,9 @@ export type PassengerAction = 'search' | 'load-ride' | 'book' | 'cancel' | 'load
 // departure guard). Anything else gets generic copy: server text is never shown raw.
 const BOOK_CONFLICTS: Record<string, string> = {
   'No seats available': 'This ride is full. There are no seats left to request.',
+  // c1a7e0b00003: some seats remain, but fewer than requested. Fixed copy (no
+  // number): the page refetches the ride, so the selector shows what is left.
+  'Not enough seats available': 'Not enough seats are left for that many. Choose fewer seats and try again.',
   'Ride is not active': 'This ride is no longer taking requests. It may have been cancelled or completed.',
   'You already booked this ride': 'You have already requested a seat on this ride. Check My bookings for its status.',
   'Ride has already departed': 'This ride has already departed, so it can’t be booked.',
@@ -52,6 +55,9 @@ export function passengerErrorMessage(error: unknown, action: PassengerAction): 
     return 'That couldn’t be completed because something changed. Please refresh and try again.';
   }
   if (status === 422) {
+    // c1a7e0b00003: BOOKING_MAX_SEATS lowered below the selector's cap. N is re-rendered only as a validated small integer.
+    const cap = action === 'book' && detail ? /^At most ([1-8]) seats? per booking$/.exec(detail) : null;
+    if (cap) return `You can request at most ${cap[1]} seat${cap[1] === '1' ? '' : 's'} at a time. Choose fewer seats.`;
     if (action === 'search') return 'Please check your search filters and try again.';
     return 'Some details weren’t accepted. Please refresh and try again.';
   }

@@ -14,3 +14,4 @@
 .manage-link{color:var(--blue);font-weight:650;text-decoration:underline;font-size:.75rem;padding:10px 0;min-height:44px;display:inline-flex;align-items:center}
 @media(min-width:640px){.ride-form-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}
 @media(min-width:1000px){.ride-form-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.seat-shortfall{margin:8px 0 0}
