@@ -404,6 +404,22 @@ test.describe('passenger journey (mocked API)', () => {
     await expect(page).toHaveURL('/passenger/rides/8');
   });
 
+  test('reloading again while the session is still being restored keeps the session (regression)', async ({ page }) => {
+    const api = new MockApi();
+    await signIn(page, api);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    // The first /me after the next load hangs, so the second reload lands mid-restore.
+    api.overrides.set('GET /me', async () => { api.overrides.delete('GET /me'); await gate; return { status: 200, body: fakeUser }; });
+    await page.goto('/passenger/bookings?status=pending');
+    await expect(page.getByText('Restoring your session…')).toBeVisible();
+    await page.reload();
+    release();
+    await expect(page).toHaveURL('/passenger/bookings?status=pending');
+    await expect(page.getByRole('heading', { level: 1, name: 'Your seat requests' })).toBeVisible();
+    expect(await page.evaluate(() => sessionStorage.getItem('rideshare.session.v1'))).not.toBeNull();
+  });
+
   test('a saved session the server rejects on reload signs out cleanly', async ({ page }) => {
     const api = new MockApi();
     await signIn(page, api);

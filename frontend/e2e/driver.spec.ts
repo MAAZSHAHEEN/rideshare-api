@@ -265,6 +265,8 @@ test.describe('driver journey (mocked API)', () => {
     for (let i = 0; i < 22; i += 1) api.rides.push({ id: 200 + i, driver_id: 42, origin: 'Lahore', destination: `Town ${i}`, departure_time: iso(100 + i), available_seats: 2, fare_per_seat: 1000, status: 'active' });
     api.bookings.push({ id: 90, ride_id: 200, passenger_id: 105, status: 'pending', passenger: { id: 105, name: 'Esa Test' } });
     await signIn(page, api);
+    await expect.poll(() => api.countReads.length).toBe(1); // the overview's own counts call
+    api.countReads = [];
     await page.goto('/driver/rides?filter=upcoming');
     await expect(page.getByRole('article')).toHaveCount(20);
     await expect(page.getByText('Page 1 of 2')).toBeVisible();

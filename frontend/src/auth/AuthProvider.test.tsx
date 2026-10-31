@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
-import { AuthProvider, safeReturnPath, useAuth } from './AuthProvider';
+import { AuthProvider, resetPageUnloadingForTests, safeReturnPath, useAuth } from './AuthProvider';
 import { SESSION_KEY } from './sessionStore';
 import type { User } from '../api/types';
 
@@ -201,6 +201,27 @@ describe('tab session persistence (AST-023)', () => {
     mountProbe();
     expect(await screen.findByText('Your session has ended. Please sign in again.')).toBeInTheDocument();
     expect(screen.getByText('Signed out')).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+  it('a reload while /me is in flight keeps the saved session (the aborted fetch is not a restore failure)', async () => {
+    const saved = JSON.stringify({ token: token(), expiresAt: 1, mode: 'passenger' });
+    window.sessionStorage.setItem(SESSION_KEY, saved);
+    let fail!: (reason: unknown) => void;
+    vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; })));
+    mountProbe();
+    try {
+      // The browser starts unloading, then aborts the in-flight request.
+      window.dispatchEvent(new Event('pagehide'));
+      await act(async () => { fail(new TypeError('Failed to fetch')); });
+      expect(window.sessionStorage.getItem(SESSION_KEY)).toBe(saved);
+      expect(screen.queryByText(/couldn’t restore your session/)).toBeNull();
+    } finally { resetPageUnloadingForTests(); }
+  });
+  it('a network failure during restore (page not unloading) still clears the session with a message', async () => {
+    window.sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: token(), expiresAt: 1, mode: null }));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch')));
+    mountProbe();
+    expect(await screen.findByText('We couldn’t restore your session. Please sign in again.')).toBeInTheDocument();
     expect(window.sessionStorage.getItem(SESSION_KEY)).toBeNull();
   });
   it('does not trust a saved profile that fails validation', async () => {

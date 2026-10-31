@@ -84,6 +84,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       startSession(saved.token, identity, saved.expiresAt, generation, saved.mode);
     }).catch((reason: unknown) => {
       if (controller.signal.aborted || credentials.current.generation !== generation) return;
+      // A reload (or navigation) while /me is in flight aborts the fetch as the page
+      // unloads. That is not a restore failure: clearing the saved session here
+      // would sign the visitor out of the page they are reloading into.
+      if (pageUnloading()) return;
       endSession(reason instanceof ApiError && reason.status === 401
         ? 'Your session has ended. Please sign in again.'
         : 'We couldn’t restore your session. Please sign in again.');
@@ -133,6 +137,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return <AuthContext.Provider value={{ user, api, login, logout: () => { endSession(); setLoggedOut(true); }, notice, mode, selectMode, restoring, loggedOut }}>{children}</AuthContext.Provider>;
 }
+
+// Set when this document starts unloading (reload, navigation); reset if it is restored from the back/forward cache.
+let unloading = false;
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => { unloading = true; });
+  window.addEventListener('pagehide', () => { unloading = true; });
+  window.addEventListener('pageshow', () => { unloading = false; });
+}
+/** True once the page is unloading; exported for tests. */
+export function pageUnloading() { return unloading; }
+/** Test hook: reset the unloading flag. */
+export function resetPageUnloadingForTests() { unloading = false; }
 
 export function useAuth() {
   const value = useContext(AuthContext);
