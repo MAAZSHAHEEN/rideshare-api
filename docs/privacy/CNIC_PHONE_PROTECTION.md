@@ -75,12 +75,12 @@ duplicate detection (CNIC unique; phone lookup later) keeps working with an inde
 
 ### 4.2 Cryptography
 
-- Library: `cryptography` (already pinned, 46.0.5) – `AESGCM`. No home-made crypto.
+- Library: `cryptography` – `AESGCM`. No home-made crypto. AST-008 (PR #10) removes the unused `cryptography` pin, so add it back at the latest audited release (≥ 46.0.6) when the encryption work starts, and keep it in the pip-audit job.
 - Encryption: random 96-bit nonce per value; AAD = `b"rideshare/users/<column>/v<key_version>"` so a ciphertext cannot be swapped between columns.
 - Blind index: HMAC-SHA256 over the **canonical** form only (13-digit CNIC, E.164 phone) – normalisation from AST-007 is a prerequisite. Separate keys per column and separate from the encryption key, so one leaked key does not expose the others.
 - Key material: `PII_ENC_KEYS` (JSON map `version → base64 32-byte key`, plus `PII_ENC_ACTIVE_VERSION`), `PII_BIDX_KEY_CNIC`, `PII_BIDX_KEY_PHONE`, held in the FastAPI Cloud secret store (later a KMS with envelope encryption). Never in the DB, never in the repo, never in logs.
 - Low-entropy warning: the CNIC space is ~10¹³. With the HMAC key secret, the index reveals only equality. **If `PII_BIDX_KEY_CNIC` leaks together with the DB, CNICs can be brute-forced** (10¹³ HMACs is feasible on GPUs). Treat the bidx keys as tier-0 secrets; do not truncate the HMAC (collisions would break uniqueness).
-- Display: the API never returns CNIC/phone. If an admin view needs it later, return a mask (`*****-*******-1`, `+92 3** *** **67`) and decrypt only behind an admin role with an audit-log entry (M5).
+- Display: the API never returns CNIC/phone. If an admin view needs it later, return a mask (`*****-****NNN-*`, `+92 3** *** **NN`; the CNIC's final digit encodes gender, so the mask hides it, as implemented by `privacy.mask_cnic` in PR #13) and decrypt only behind an admin role with an audit-log entry (M5).
 
 ### 4.3 Code shape
 
