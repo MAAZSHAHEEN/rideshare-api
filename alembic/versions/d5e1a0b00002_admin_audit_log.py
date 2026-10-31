@@ -1,4 +1,4 @@
-"""Append-only admin audit log (Milestone D, M5-B).
+r"""Append-only admin audit log (Milestone D, M5-B).
 
 Revision ID: d5e1a0b00002
 Revises: d5e1a0b00001
