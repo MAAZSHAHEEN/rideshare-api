@@ -36,7 +36,8 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Authorization", "Content-Type"],
-    expose_headers=["Retry-After"],
+    # Retry-After for 429s (G6); X-Total-Count on list endpoints (G7).
+    expose_headers=["Retry-After", "X-Total-Count"],
 )
 app.include_router(auth.router)
 app.include_router(rides.router)
