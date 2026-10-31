@@ -488,6 +488,10 @@ async function axe(page: Page, testInfo: TestInfo, name: string) {
 
 test.describe('driver accessibility (axe)', () => {
   test('publish form (with errors), my rides, ride requests and dialog', async ({ page }, testInfo) => {
+    // Seven full-page axe scans plus five navigations in one test take ~28-31 s on a
+    // loaded 2-vCPU runner, right at Playwright's 30 s default (F-RC-1, RC report §8).
+    // No single step is slow, so give the whole test a 60 s budget instead of splitting it.
+    test.setTimeout(60_000);
     const api = new MockDriverApi();
     await signIn(page, api);
     await axe(page, testInfo, 'dashboard');
