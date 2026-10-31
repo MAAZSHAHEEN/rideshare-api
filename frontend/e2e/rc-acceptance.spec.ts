@@ -328,16 +328,18 @@ test.describe('RC acceptance (integrated build, live disposable backend)', () =>
     await page.goto('/passenger/bookings');
     await expect(page).toHaveURL(/\/login/);
     expect(meCalls).toBe(0);
-    // D-RC-1 (documented in handover/RC_ACCEPTANCE.md): the client checks the token's exp
-    // against the DEVICE clock, so while this browser's clock is still 61 min fast a fresh
-    // token already looks expired and sign-in fails closed (clear copy, no loop).
-    await fillLogin(page, p.email, password);
-    await expect(page.getByRole('alert')).toHaveText('The sign-in session is invalid or expired. Please sign in again.');
-    await shot(page, testInfo, 'w3-02-clock-skew-sign-in-refused');
-    // With the device clock correct again, signing in returns to the protected route.
-    await page.clock.setSystemTime(new Date());
+    // D-RC-1 fixed (fix/frontend-session-resilience): expiry comes from the server-issued
+    // lifetime exp − iat counted from receipt, not from comparing exp with the device clock.
+    // While this browser's clock is still 61 min fast, a fresh real token signs in normally.
     await fillLogin(page, p.email, password);
     await expect(page).toHaveURL('/passenger/bookings');
+    await expect(page.getByRole('heading', { name: 'No bookings yet.' })).toBeVisible();
+    await shot(page, testInfo, 'w3-02-clock-skew-sign-in-accepted');
+    // Correcting the device clock (a 61-minute jump back) neither ends nor extends the session.
+    await page.clock.setSystemTime(new Date());
+    await page.reload();
+    await expect(page).toHaveURL('/passenger/bookings');
+    await expect(page.getByRole('heading', { name: 'No bookings yet.' })).toBeVisible();
     await context.close();
   });
 
@@ -392,14 +394,20 @@ test.describe('RC acceptance (integrated build, live disposable backend)', () =>
     await shot(page, testInfo, 'w4-04-conflict-409-full');
 
     // API down while a signed-in tab reloads (session restore cannot reach GET /me).
-    // D-RC-2: the restore treats a network failure like a rejected token and clears the session.
+    // D-RC-2 fixed: the stored session is kept and a retryable state is shown; no redirect.
     const meApi = (url: URL) => url.pathname === '/me';
     await page.route(meApi, route => route.abort('connectionrefused'));
     await page.goto('/passenger/bookings');
-    await expect(page).toHaveURL(/\/login/);
-    await expect(page.getByText('We couldn’t restore your session. Please sign in again.')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Can’t reach RideShare' })).toBeVisible();
+    await expect(page).toHaveURL('/passenger/bookings');
+    expect(await page.evaluate(() => sessionStorage.getItem('rideshare.session.v1'))).not.toBeNull();
     await shot(page, testInfo, 'w4-05-api-down-during-restore');
+    // The API comes back: Retry restores the same session against the real backend.
     await page.unroute(meApi);
+    await page.getByRole('button', { name: 'Retry' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Your seat requests' })).toBeVisible();
+    await expect(page).toHaveURL('/passenger/bookings');
+    await shot(page, testInfo, 'w4-06-restore-recovered');
     await context.close();
   });
 
