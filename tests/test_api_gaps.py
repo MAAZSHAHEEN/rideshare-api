@@ -31,7 +31,7 @@ with patch.dict(os.environ, {
 B, R = BookingStatus, RideStatus
 NOW = datetime(2030, 3, 10, 6, 0, tzinfo=timezone.utc)
 PKT = timezone(timedelta(hours=5))
-WITHDREW = "Booking was cancelled by the passenger"
+WITHDREW = "This booking is no longer available."  # R-1 neutral wording, exact
 ANSWERED = "Booking already responded to"
 RIDE_KEYS = {"id", "driver_id", "origin", "destination", "departure_time",
              "available_seats", "fare_per_seat", "status"}
@@ -356,6 +356,40 @@ class ApiGapTests(unittest.IsolatedAsyncioTestCase):
             ride = await db.get(Ride, ride_id)
             booking = await db.get(Booking, booking_id)
             self.assertEqual((ride.available_seats, booking.status), (1, B.cancelled))
+
+    async def test_r1_cancelled_booking_on_active_ride_has_neutral_exact_wording(self):
+        # R-1 (Maaz, 31 Oct 2026). A booking on a still-active ride can be
+        # cancelled by its passenger or by the passenger's account suspension
+        # (#19 cancels pending and accepted bookings server-side, without the
+        # passenger). The driver gets one neutral, exact string for both, which
+        # never says why. Here the server-side cancellation is written directly,
+        # as the suspension service does, for a pending and an accepted request.
+        import lifecycle
+        self.assertEqual(lifecycle.BOOKING_UNAVAILABLE, "This booking is no longer available.")
+        self.assertEqual(lifecycle.PASSENGER_WITHDREW, lifecycle.BOOKING_UNAVAILABLE)
+        for answered_first in (False, True):
+            ride_id = await self.ride(available_seats=2)
+            booking_id = (await self.client.post(f"/bookings/{ride_id}",
+                                                 headers=self.headers("passenger"))).json()["id"]
+            if answered_first:
+                self.assertEqual((await self.respond(booking_id, True)).status_code, 200)
+            async with AsyncSession(self.engine) as db:  # suspension-style cancellation
+                booking = await db.get(Booking, booking_id)
+                ride = await db.get(Ride, ride_id)
+                booking.status = B.cancelled
+                ride.available_seats = 2
+                await db.commit()
+            for accept in (True, False):
+                with self.subTest(accepted_before=answered_first, accept=accept):
+                    response = await self.respond(booking_id, accept)
+                    self.assertEqual(response.status_code, 409)
+                    self.assertEqual(response.json(), {"detail": "This booking is no longer available."})
+                    detail = response.json()["detail"].lower()
+                    for revealing in ("passenger", "suspend", "withdr", "cancelled by"):
+                        self.assertNotIn(revealing, detail)
+            async with AsyncSession(self.engine) as db:
+                self.assertEqual(((await db.get(Ride, ride_id)).available_seats,
+                                  (await db.get(Booking, booking_id)).status), (2, B.cancelled))
 
     async def lock_waiters(self):
         async with self.engine.connect() as conn:

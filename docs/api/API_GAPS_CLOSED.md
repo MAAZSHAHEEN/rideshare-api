@@ -65,11 +65,11 @@ body changes shape, no migration. Contract tests that pinned old *behaviour*
 
 ### D7 — distinct 409s for "passenger withdrew" vs "already answered"
 - `PATCH /bookings/{id}/respond?accept=true|false`:
-  - booking `cancelled` **and** ride still `active` → 409 **`Booking was cancelled by the passenger`** (new string). On an active ride, only the passenger can have cancelled it.
+  - booking `cancelled` **and** ride still `active` → 409 **`This booking is no longer available.`** (exact, with the period). **R-1 (Maaz, 31 Oct 2026):** neutral wording. The first version of #17 sent `Booking was cancelled by the passenger`; that was replaced because account suspension (#19) also cancels a passenger's bookings on an active ride, and no driver-facing message may reveal why a booking went away (privacy: it must not disclose a suspension). The passenger-withdrawal and the suspension cases deliberately get the same string. `lifecycle.PASSENGER_WITHDREW` stays as a deprecated alias of `lifecycle.BOOKING_UNAVAILABLE`.
   - booking `accepted` or `rejected` → 409 `Booking already responded to` (**unchanged**).
   - booking `cancelled` on a cancelled/completed ride (the cascade) → 409 `Booking already responded to` (**unchanged**, booking-first guard order kept).
 - Guard order, lock order (Ride → Booking) and every other string are unchanged. If a future flow cancels single bookings on an active ride (M5 admin moderation, pending expiry), `lifecycle.respond_target` must be revisited (comment in code).
-- Tests: `test_d7_withdrawn_vs_already_answered` (5 states × accept/reject), `test_d7_passenger_withdraws_then_driver_answers_through_the_api`, `test_d7_withdrawal_racing_an_accept_reports_the_withdrawal` (forced order on the Ride lock); `tests/test_lifecycle.py` HTTP matrix expectation updated deliberately for (active, cancelled, accept|reject).
+- Tests: `test_d7_withdrawn_vs_already_answered` (5 states × accept/reject), `test_d7_passenger_withdraws_then_driver_answers_through_the_api`, `test_d7_withdrawal_racing_an_accept_reports_the_withdrawal` (forced order on the Ride lock), `test_r1_cancelled_booking_on_active_ride_has_neutral_exact_wording` (server-side, suspension-style cancellation of a pending and an accepted request; exact string; no "passenger"/"suspend"/"withdr"/"cancelled by"); `tests/test_lifecycle.py` HTTP matrix expectation updated deliberately for (active, cancelled, accept|reject).
 
 ### Also on this stack (from #12, for the frontend)
 - `PATCH /rides/{id}/complete` before departure → 409 `Ride cannot be completed before its departure time` (AST-016).
@@ -91,7 +91,7 @@ Files are on `feat/driver-journey` (#16) / `feat/passenger-journey` (#14).
 6. **Driver overview (`Dashboard.tsx`)** — optional: a pending badge per ride via `rideBookingCounts`.
 7. **Driver `DriverRide.tsx`** — use `rideBookings` `total` for the "N pending · M accepted" summary when more than one page exists, or `rideBookingCounts([id])`.
 8. **`src/driver/errors.ts`**:
-   - `ACCEPT_CONFLICTS['Booking was cancelled by the passenger'] = 'The passenger withdrew this request, so it can’t be answered. The list has been refreshed.'`, and the same key in `REJECT_CONFLICTS`.
+   - `ACCEPT_CONFLICTS['This booking is no longer available.']` = neutral copy that does not say why (e.g. 'This request is no longer available, so it can’t be answered. The list has been refreshed.'), and the same key in `REJECT_CONFLICTS`. Keep the pre-R-1 key `'Booking was cancelled by the passenger'` mapped to the same neutral copy for older backends.
    - Narrow `'Booking already responded to'` copy to "This request was already answered. The list has been refreshed with its current status." (keep the key; the server still sends it for accepted/rejected and for cascades).
    - `RIDE_CONFLICTS['Ride cannot be completed before its departure time'] = 'This ride can be marked completed only after its departure time.'` (from #12; today it falls back to the generic "Something changed…" copy).
 9. **`src/passenger/errors.ts`** — `CANCEL_CONFLICTS['Ride has already departed'] = 'This ride has already departed, so an accepted seat can no longer be cancelled.'` (from #12; currently generic).

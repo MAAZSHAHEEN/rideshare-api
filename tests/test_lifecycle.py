@@ -44,7 +44,7 @@ EXPECTED_BOOKING = {
 }
 # D7: a request the passenger withdrew (cancelled booking, ride still active)
 # is reported distinctly to the driver; every other conflict keeps its string.
-WITHDREW = "Booking was cancelled by the passenger"
+WITHDREW = "This booking is no longer available."  # R-1 neutral wording, exact
 BOOKING_CONFLICT = {"accept": "Booking already responded to",
                     "reject": "Booking already responded to",
                     "cancel": "Booking cannot be cancelled"}

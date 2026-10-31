@@ -28,9 +28,17 @@ RIDE_DEPARTED = "Ride has already departed"
 NO_SEATS = "No seats available"
 ALREADY_RESPONDED = "Booking already responded to"
 NOT_CANCELLABLE = "Booking cannot be cancelled"
-# D7 (API gaps): answering a request the passenger already withdrew. Replaces
-# ALREADY_RESPONDED only for that case; accepted/rejected keep the old string.
-PASSENGER_WITHDREW = "Booking was cancelled by the passenger"
+# D7 (API gaps): answering a request that was cancelled while its ride is still
+# active. Replaces ALREADY_RESPONDED only for that case; accepted/rejected keep
+# the old string. R-1 (Maaz, 31 Oct 2026): the wording is deliberately neutral.
+# A booking on an active ride is cancelled either by its passenger or by the
+# passenger's account suspension (#19), and the driver must not learn which, so
+# no driver-facing message may say why. Was "Booking was cancelled by the
+# passenger" before R-1.
+BOOKING_UNAVAILABLE = "This booking is no longer available."
+# Deprecated alias kept so callers/tests written against #17's first version
+# (e.g. #27's version-aware expectations) keep resolving to the current string.
+PASSENGER_WITHDREW = BOOKING_UNAVAILABLE
 # New in AST-016 (product decision 31 Oct 2026): completion only after departure.
 NOT_YET_DEPARTED = "Ride cannot be completed before its departure time"
 
@@ -83,18 +91,21 @@ def booking_target(status: BookingStatus, action: BookingAction) -> BookingStatu
 
 
 def respond_target(booking, ride: Ride, action: BookingAction) -> BookingStatus:
-    """Driver accept/reject: like ``booking_target`` but names a withdrawal.
+    """Driver accept/reject: like ``booking_target`` but reports a booking
+    that is no longer available.
 
-    A ``cancelled`` booking on a still-``active`` ride can only have been
-    cancelled by its passenger: the other paths to ``cancelled`` (driver ride
-    cancellation, completion cascade) also end the ride, and those keep the
-    old ``ALREADY_RESPONDED`` string. If a future flow cancels single bookings
-    on an active ride (admin moderation, pending expiry), revisit this rule.
+    A ``cancelled`` booking on a still-``active`` ride was cancelled by its
+    passenger or by the passenger's account suspension; both answer the same
+    neutral ``BOOKING_UNAVAILABLE`` so the driver cannot infer a suspension
+    (R-1). The other paths to ``cancelled`` (driver ride cancellation,
+    completion cascade) also end the ride, and those keep the old
+    ``ALREADY_RESPONDED`` string. Any future flow that cancels single bookings
+    on an active ride must also stay behind this neutral string.
     The guard order is unchanged: booking state is judged before ride state.
     """
     if (action in ("accept", "reject") and booking.status == BookingStatus.cancelled
             and ride.status == RideStatus.active):
-        raise conflict(PASSENGER_WITHDREW)
+        raise conflict(BOOKING_UNAVAILABLE)
     return booking_target(booking.status, action)
 
 
