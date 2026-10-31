@@ -18,7 +18,7 @@ from uuid import uuid4
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import CheckConstraint, Enum, Index, MetaData, inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -102,7 +102,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.connect() as connection:
             return await connection.run_sync(inspect_schema)
 
-    HEAD_REVISION = "d5e1a0b00001"
+    HEAD_REVISION = "d5e1a0b00002"
 
     async def assert_metadata_matches(self, metadata=None, revision_id=HEAD_REVISION):
         metadata = metadata if metadata is not None else Base.metadata
@@ -158,7 +158,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
             for column in table.columns if isinstance(column.type, Enum)
         }
         self.assertEqual(state["enums"], expected_enums)
-        self.assertEqual(state["sequences"], {"users_id_seq", "rides_id_seq", "bookings_id_seq"})
+        self.assertEqual(state["sequences"], {f"{name}_id_seq" for name in metadata.tables})
         return state
 
     FK_INDEXES = {
@@ -170,10 +170,18 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
     SUSPENSION_COLUMNS = ("account_status", "token_version")
     SUSPENSION_CHECKS = ("ck_users_account_status", "ck_users_token_version_nonnegative")
 
+    def d5e1_status_metadata(self):
+        """Schema at d5e1a0b00001, before the admin audit log (d5e1a0b00002)."""
+        metadata = MetaData()
+        for table in Base.metadata.sorted_tables:
+            if table.name != "admin_audit_log":
+                table.to_metadata(metadata)
+        return metadata
+
     def f6b2_metadata(self):
         """Schema at f6b2d8e0c413, before Milestone D account status (d5e1a0b00001)."""
         metadata = MetaData()
-        for table in Base.metadata.sorted_tables:
+        for table in self.d5e1_status_metadata().sorted_tables:
             historical_table = table.to_metadata(metadata)
             if table.name == "users":
                 historical_table.constraints = {
@@ -541,7 +549,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         for attempt in range(2):
             relfilenode = await self.users_relfilenode()
             await self.run_python("-m", "alembic", "upgrade", "d5e1a0b00001")
-            await self.assert_metadata_matches()
+            await self.assert_metadata_matches(self.d5e1_status_metadata(), "d5e1a0b00001")
             # ADD COLUMN ... NOT NULL DEFAULT <constant> is catalog-only on PG >= 11.
             self.assertEqual(await self.users_relfilenode(), relfilenode, "users was rewritten")
             async with self.engine.connect() as connection:
@@ -576,6 +584,47 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await connection.execute(text(
                     "SELECT id, name, email, password, cnic, phone_number, role FROM users "
                     "WHERE id < 10 ORDER BY id"))).all(), before)
+
+    async def audit_trigger_objects(self):
+        async with self.engine.connect() as connection:
+            return (await connection.execute(text("""
+                SELECT 'trigger:' || tgname FROM pg_trigger
+                 WHERE tgrelid = to_regclass('admin_audit_log') AND NOT tgisinternal
+                UNION ALL
+                SELECT 'function:' || proname FROM pg_proc WHERE proname = 'admin_audit_log_immutable'
+                ORDER BY 1
+            """))).scalars().all()
+
+    async def test_admin_audit_log_upgrade_downgrade_reupgrade_and_immutability(self):
+        await self.prepare_integrity_data("d5e1a0b00001")
+        await self.assert_metadata_matches(self.d5e1_status_metadata(), "d5e1a0b00001")
+        for attempt in range(2):
+            await self.run_python("-m", "alembic", "upgrade", "d5e1a0b00002")
+            await self.assert_metadata_matches()
+            self.assertEqual(await self.audit_trigger_objects(), [
+                "function:admin_audit_log_immutable",
+                "trigger:admin_audit_log_no_truncate",
+                "trigger:admin_audit_log_no_update_delete",
+            ])
+            await self.execute_sql("""
+                INSERT INTO admin_audit_log (actor_id, action, target_type, target_id, reason)
+                VALUES (1, 'user.suspend', 'user', 2, 'migration test')
+            """)
+            async with self.engine.connect() as connection:
+                row = (await connection.execute(text(
+                    "SELECT metadata, created_at IS NOT NULL FROM admin_audit_log"))).one()
+            self.assertEqual(row, ({}, True))
+            for statement in ("UPDATE admin_audit_log SET reason = 'x'",
+                              "DELETE FROM admin_audit_log", "TRUNCATE admin_audit_log"):
+                with self.subTest(attempt=attempt, statement=statement):
+                    with self.assertRaises(DBAPIError) as raised:
+                        await self.execute_sql(statement)
+                    self.assertEqual(raised.exception.orig.sqlstate, "42501")
+            await self.run_python("-m", "alembic", "downgrade", "-1")
+            await self.assert_metadata_matches(self.d5e1_status_metadata(), "d5e1a0b00001")
+            self.assertEqual(await self.audit_trigger_objects(), [])
+            async with self.engine.connect() as connection:
+                self.assertEqual(await connection.scalar(text("SELECT count(*) FROM users")), 2)
 
     async def test_empty_database_upgrade_downgrade_reupgrade_and_startup(self):
         empty = {"tables": set(), "enums": {}, "sequences": set()}

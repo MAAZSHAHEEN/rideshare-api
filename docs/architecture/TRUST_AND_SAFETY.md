@@ -234,6 +234,20 @@ terms must say so (§10).
 2. Backlog of existing drivers reviewed.
 3. Turn the flag on (env change, approval gate): `create_ride` and `respond_to_booking` (accept) return 403 `Driver approval required` unless approved + approved vehicle. Already-published rides by unapproved drivers: **decision D4** (cancel, or let them run out).
 
+### 6.4 Revision `d5e1a0b00003` (driver profiles + vehicles): design only, NOT implemented
+
+Not built in Milestone D: it needs decisions D2 (verification route), D3
+(document storage) and D4 (enforcement timing) first, and nothing in it may
+be shown as "verified". Planned content of the revision, after
+`d5e1a0b00002` in the chain:
+
+- `driver_profiles`: `user_id INT PRIMARY KEY → users.id`, `status VARCHAR(16) NOT NULL DEFAULT 'not_verified'` with `CHECK (status IN ('not_verified','submitted','under_review','approved','rejected','suspended'))`, `licence_expiry DATE NULL`, `submitted_at`, `reviewer_id INT NULL → users.id`, `decided_at`, `decision_checklist JSONB NULL`, `rejection_reason VARCHAR(32) NULL` (code, not free text), `created_at`. **No licence number or document reference until D3** (no identity data is collected before storage/retention policy is approved).
+- `vehicles`: as §7 minus `registration_doc_ref` (same D3 reason); `status` VARCHAR + CHECK; partial unique index on `plate_number WHERE status IN ('pending','approved')`.
+- Both are new, empty tables: no legacy rows, instant; downgrade drops them.
+- Every transition is `UPDATE … WHERE status = :expected` under `FOR NO KEY UPDATE` on the profile row, writes an audit row (`driver_profile.claim/approve/reject/suspend`, `vehicle.approve/reject`), and is refused while the account is suspended. Lock order extends to **User → DriverProfile → Vehicle → Ride → Booking**.
+- `verification.driver_verification_status()` keeps returning `not_verified` until D2 names a real check; the only label is **"Driver documents not verified"**. An `approved` row means "an admin completed the checklist", and the UI copy must say exactly that, never "verified".
+- `DRIVER_ELIGIBILITY_ENFORCED` stays off (env change = approval gate).
+
 ## 7. Vehicle information (migration M5-C)
 
 `vehicles`: `id`, `driver_id` FK users, `make` (≤ 40), `model` (≤ 40),
@@ -294,6 +308,17 @@ Optional hardening: `prev_hash`/`row_hash` chain for tamper evidence, and a
 periodic export to separate storage. The log itself never stores full
 CNIC/phone; a PII reveal is logged as `action = pii_revealed`, `details =
 {"fields": ["phone_number"]}`.
+
+### 9.1 As implemented (`feat/admin-audit-log`, revision `d5e1a0b00002`)
+
+| Topic | Implemented | Difference from the proposal above |
+|---|---|---|
+| Table | `admin_audit_log`: `id BIGSERIAL`, `actor_id INT NULL → users.id` (NULL = operator script/system), `action VARCHAR(64)`, `target_type VARCHAR(32)`, `target_id BIGINT`, `reason VARCHAR(500) NULL`, `metadata JSONB NOT NULL DEFAULT '{}'`, `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`. Indexes `(target_type, target_id, id)`, `(actor_id, id)`. | `at` → `created_at`, `note`/`reason_code` → one bounded, digit-filtered `reason`, `details` → `metadata` (ORM attribute `details`, since `metadata` is reserved by SQLAlchemy). `request_id` deferred until request ids exist. Ordering by `id` (monotonic) instead of `at`. |
+| Write path | `audit.record(db, …)` adds + flushes in the caller's transaction; never commits. Actions: `user.view` (masked lookup), `user.suspend`, `user.reinstate`. | Reads of the masked view are logged too (T5, PII browsing). |
+| No PII | `audit.validate_metadata` rejects keys that look like personal data (`cnic`, `phone`, `email`, `name`, `password`, `address`, `token…` except `token_version`, …) and allows only ints, bools, null, short lowercase codes and lists of int ids. Violations raise (programming error). The reason passes the admin API's ≥ 7-digit filter. | — |
+| Immutability | `admin_audit_log_immutable()` + `BEFORE UPDATE OR DELETE … FOR EACH ROW` + `BEFORE TRUNCATE … FOR EACH STATEMENT`; raises SQLSTATE 42501 for every role, including the owner. The same DDL is attached to `metadata.create_all` (tests) via an `after_create` listener; the migration holds a frozen copy. | Grants (app role INSERT/SELECT only) remain an approval-gated production role change. A superuser or the table owner can still `ALTER TABLE … DISABLE TRIGGER`; the grant split is what closes that. Hash chaining not implemented. |
+| Read API | `GET /admin/audit-log?limit=1..100&before_id=&target_type=&target_id=&actor_id=&action=`, newest first, keyset pagination via `next_before_id`. | Keyset instead of offset: stable under concurrent inserts. |
+| Downgrade | Drops triggers, function, table. **Deletes the audit history**: export first. | — |
 
 ## 10. Honest UI labels and privacy
 

@@ -1,7 +1,8 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, Index, Integer, String, DateTime, Enum as SAEnum, ForeignKey, func, text
+from sqlalchemy import BigInteger, CheckConstraint, Column, DDL, Index, Integer, String, DateTime, Enum as SAEnum, ForeignKey, event, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
 
@@ -99,3 +100,55 @@ class Booking(Base):
     passenger_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     status     = Column(SAEnum(BookingStatus), nullable=False, default=BookingStatus.pending)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+# Append-only enforcement for admin_audit_log. Migration d5e1a0b00002 creates
+# the same objects (frozen copy); this listener gives schemas built with
+# metadata.create_all (tests) identical behaviour.
+AUDIT_LOG_IMMUTABLE_FUNCTION_SQL = """
+CREATE FUNCTION admin_audit_log_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'admin_audit_log is append-only (% blocked)', TG_OP
+        USING ERRCODE = 'insufficient_privilege';
+END;
+$$
+"""
+AUDIT_LOG_ROW_TRIGGER_SQL = (
+    "CREATE TRIGGER admin_audit_log_no_update_delete BEFORE UPDATE OR DELETE "
+    "ON admin_audit_log FOR EACH ROW EXECUTE FUNCTION admin_audit_log_immutable()"
+)
+AUDIT_LOG_TRUNCATE_TRIGGER_SQL = (
+    "CREATE TRIGGER admin_audit_log_no_truncate BEFORE TRUNCATE "
+    "ON admin_audit_log FOR EACH STATEMENT EXECUTE FUNCTION admin_audit_log_immutable()"
+)
+
+
+class AdminAuditLog(Base):
+    """One row per admin action, written in the same transaction as the action.
+
+    Never store PII here: no CNIC, phone, email or name. `details` (column
+    "metadata"; the attribute name avoids SQLAlchemy's reserved `metadata`)
+    holds ids, states and counts only, validated by audit.record().
+    """
+    __tablename__ = "admin_audit_log"
+    __table_args__ = (
+        Index('ix_admin_audit_log_target', 'target_type', 'target_id', 'id'),
+        Index('ix_admin_audit_log_actor_id_id', 'actor_id', 'id'),
+    )
+
+    id          = Column(BigInteger, primary_key=True)
+    # NULL is reserved for operator scripts and system jobs.
+    actor_id    = Column(Integer, ForeignKey("users.id"), nullable=True)
+    action      = Column(String(64), nullable=False)
+    target_type = Column(String(32), nullable=False)
+    target_id   = Column(BigInteger, nullable=False)
+    reason      = Column(String(500), nullable=True)
+    details     = Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at  = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+for _statement in (AUDIT_LOG_IMMUTABLE_FUNCTION_SQL, AUDIT_LOG_ROW_TRIGGER_SQL,
+                   AUDIT_LOG_TRUNCATE_TRIGGER_SQL):
+    event.listen(AdminAuditLog.__table__, "after_create",
+                 DDL(_statement.replace("%", "%%")).execute_if(dialect="postgresql"))
