@@ -18,7 +18,7 @@ with patch.dict(os.environ, {
     "DATABASE_URL": TEST_DATABASE_URL or "postgresql+asyncpg://localhost/rideshare_test",
     "SECRET_KEY": "admin-guard-tests-only-not-a-production-key",
 }):
-    from jose import jwt
+    import jwt
 
     import config
     from database import Base, get_db

@@ -3,7 +3,7 @@ import re
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+import jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,14 +18,38 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    token = credentials.credentials
     unauthorized = HTTPException(
         status_code=401, detail="Invalid token", headers={"WWW-Authenticate": "Bearer"},
     )
     try:
+        user_id, role = decode_access_token(credentials.credentials)
+    except InvalidAccessToken:
+        raise unauthorized from None
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if user is None or user.role != role:
+        raise unauthorized
+
+    return user
+
+
+class InvalidAccessToken(Exception):
+    """Any reason a bearer token is unusable; callers map it to a generic 401."""
+
+
+def decode_access_token(token: str) -> tuple[int, UserRole]:
+    """Verify an HS* access token and return (user_id, role).
+
+    Accepts tokens issued by python-jose (<= AST-008) and PyJWT alike: the
+    compact JWS format, header and claims are identical.
+    """
+    try:
+        # The algorithm is pinned by configuration, never taken from the token.
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={
             "verify_signature": True, "verify_exp": True,
-            "require_sub": True, "require_role": True, "require_exp": True,
+            "require": ["sub", "role", "exp"],
         })
         subject = payload["sub"]
         if not isinstance(subject, str) or not re.fullmatch(r"[1-9][0-9]{0,9}", subject):
@@ -46,16 +70,9 @@ async def get_current_user(
             raise ValueError("Invalid issued-at time")
         if "nbf" in payload and (type(payload["nbf"]) is not int or payload["nbf"] > now):
             raise ValueError("Invalid not-before time")
-    except (JWTError, ValueError, TypeError, KeyError, OverflowError):
-        raise unauthorized from None
-
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-
-    if user is None or user.role != role:
-        raise unauthorized
-
-    return user
+    except (jwt.PyJWTError, ValueError, TypeError, KeyError, OverflowError):
+        raise InvalidAccessToken from None
+    return user_id, role
 
 
 ADMIN_FORBIDDEN_DETAIL = "Admin access required"

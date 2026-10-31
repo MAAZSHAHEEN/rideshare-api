@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import bcrypt
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
+import jwt
 from sqlalchemy import text, func, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -282,7 +282,7 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def token_claims(self):
         _, user = await self.register_user()
         token = auth.create_access_token(user["id"], user["role"])
-        return jwt.get_unverified_claims(token)
+        return jwt.decode(token, options={"verify_signature": False})
 
     async def test_registration_stores_bcrypt_hash_not_plaintext(self):
         payload, _ = await self.register_user()
@@ -445,7 +445,7 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         response = await self.login_user(payload)
         self.assertEqual(response.status_code, 200)
         token = response.json()["access_token"]
-        claims = jwt.get_unverified_claims(token)
+        claims = jwt.decode(token, options={"verify_signature": False})
         self.assertEqual(claims["role"], "admin")
         for candidate in (token, self.sign({key: value for key, value in claims.items() if key != "iat"})):
             me = await self.client.get("/me", headers={"Authorization": f"Bearer {candidate}"})

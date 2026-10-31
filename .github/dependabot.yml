@@ -1,0 +1,51 @@
+# Dependency update PRs (AST-008). Weekly, minor/patch grouped per ecosystem so
+# routine bumps arrive as one reviewable PR; majors stay separate and need a
+# human decision. Security updates are raised by GitHub as soon as an advisory
+# lands, independent of this schedule (enable "Dependabot security updates" in
+# the repo settings; that setting is not changed by this file).
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    target-branch: rideshare-v2
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Karachi
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    target-branch: rideshare-v2
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Karachi
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps-frontend)"
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: rideshare-v2
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Karachi
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]
