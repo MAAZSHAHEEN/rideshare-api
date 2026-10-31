@@ -162,6 +162,26 @@ class AuditImmutabilityTests(AuditTestBase):
                     await db.rollback()
         self.assertEqual(len(await self.rows()), 1)
 
+    async def test_record_rejects_bad_input_and_writes_nothing(self):
+        bad_calls = (
+            {"action": "user.view", "target_type": "user", "metadata": {"email": "x"}},
+            {"action": "user.view", "target_type": "user", "metadata": {"ids": ["12345"]}},
+            {"action": "user.delete", "target_type": "user"},
+            {"action": "user.view", "target_type": "ride"},
+            {"action": "user.view", "target_type": "user", "reason": "x" * 501},
+        )
+        for kwargs in bad_calls:
+            with self.subTest(kwargs=kwargs):
+                async with self.session() as db:
+                    with self.assertRaises(ValueError):
+                        await audit.record(db, actor_id=None, target_id=1, **kwargs)
+                    await db.rollback()
+        async with self.session() as db:
+            with self.assertRaises(ValueError):
+                await audit.record(db, actor_id=None, action="user.view", target_type="user",
+                                   target_id="1")
+        self.assertEqual(await self.rows(), [])
+
     async def test_inserts_still_work(self):
         async with self.session() as db:
             await audit.record(db, actor_id=None, action="user.view", target_type="user",
@@ -206,7 +226,7 @@ class AuditLogEndpointTests(AuditTestBase):
     async def test_pagination_is_newest_first_and_complete(self):
         await self.seed(5)
         seen, before_id = [], None
-        while True:
+        for _ in range(10):  # bounded: a broken cursor must fail, not hang
             params = {"limit": 2} | ({"before_id": before_id} if before_id else {})
             response = await self.page(**params)
             self.assertEqual(response.status_code, 200, response.text)
@@ -216,6 +236,8 @@ class AuditLogEndpointTests(AuditTestBase):
             before_id = body["next_before_id"]
             if before_id is None:
                 break
+        else:
+            self.fail("pagination did not terminate")
         self.assertEqual(seen, sorted(seen, reverse=True))
         self.assertEqual(len(seen), 5)
         self.assertEqual(len(set(seen)), 5)
