@@ -401,12 +401,23 @@ test.describe('RC acceptance (integrated build, live disposable backend)', () =>
     await expect(page.getByRole('heading', { name: 'Can’t reach RideShare' })).toBeVisible();
     await expect(page).toHaveURL('/passenger/bookings');
     expect(await page.evaluate(() => sessionStorage.getItem('rideshare.session.v1'))).not.toBeNull();
+    // R-6: neutral header (brand only): no Log in / Get started links, no role or travel-mode nav.
+    const header = page.locator('header.site-header');
+    await expect(header.getByRole('link')).toHaveCount(1);
+    await expect(header.getByRole('navigation')).toHaveCount(0);
+    await expect(page.locator('a[href="/login"], a[href="/register"]')).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: 'Travel mode' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Can’t reach RideShare' })).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
     await shot(page, testInfo, 'w4-05-api-down-during-restore');
     // The API comes back: Retry restores the same session against the real backend.
     await page.unroute(meApi);
     await page.getByRole('button', { name: 'Retry' }).click();
     await expect(page.getByRole('heading', { level: 1, name: 'Your seat requests' })).toBeVisible();
     await expect(page).toHaveURL('/passenger/bookings');
+    await expect(header.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'My dashboard' })).toBeVisible();
+    await expect(header.getByRole('button', { name: 'Log out' })).toBeVisible();
+    await expect(page.locator('a[href="/login"], a[href="/register"]')).toHaveCount(0);
     await shot(page, testInfo, 'w4-06-restore-recovered');
     await context.close();
   });
@@ -511,6 +522,9 @@ test.describe('RC acceptance (integrated build, live disposable backend)', () =>
     await driver.goto(`/driver/rides/${rideId}`);
     await expect(driver.getByText('3 seats left')).toBeVisible();
     await expect(driver.getByRole('heading', { name: 'Cancelled (1)' })).toBeVisible();
+    // R-1: the driver is never told why (no passenger/suspension attribution).
+    await expect(driver.getByText('No longer available: withdrawn, or cancelled with the ride.')).toBeVisible();
+    await expect(driver.getByText(/suspend|by the passenger/i)).toHaveCount(0);
     await shot(driver, testInfo, 'w6-03-driver-seats-restored');
     await context.close();
     await dCtx.close();
