@@ -21,8 +21,8 @@ from uuid import uuid4
 
 import bcrypt
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
-from sqlalchemy import func, select, update
+import jwt
+from sqlalchemy import text, func, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.schema import CreateSchema
@@ -175,6 +175,103 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.json(), {"detail": "Registration details already in use"})
                 self.assertEqual(await self.connection.scalar(select(func.count()).select_from(User)), 1)
 
+    async def test_email_is_trimmed_and_lowercased_on_registration(self):
+        payload = {**self.payload("passenger")}
+        payload["email"] = "  Mixed.Case-" + payload["email"].upper() + "  "
+        response = await self.client.post("/auth/register", json=payload)
+        self.assertEqual(response.status_code, 201, response.text)
+        expected = payload["email"].strip().lower()
+        self.assertEqual(response.json()["email"], expected)
+        self.assertEqual(await self.connection.scalar(select(User.email)), expected)
+
+    async def test_case_variant_email_registration_returns_generic_conflict(self):
+        payload, _ = await self.register_user()
+        for variant in (payload["email"].upper(), payload["email"].title(), f" {payload['email']} "):
+            with self.subTest(variant=variant):
+                response = await self.client.post(
+                    "/auth/register", json={**self.payload("passenger"), "email": variant})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json(), {"detail": "Registration details already in use"})
+        self.assertEqual(await self.connection.scalar(select(func.count()).select_from(User)), 1)
+
+    async def test_case_variant_unique_index_race_maps_to_generic_conflict(self):
+        payload, _ = await self.register_user()
+        # Skip the application pre-check so only uq_users_email_lower can reject it.
+        with patch.object(auth, "email_matches", return_value=User.id == -1):
+            response = await self.client.post("/auth/register", json={
+                **self.payload("passenger"), "email": payload["email"].upper()})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"detail": "Registration details already in use"})
+
+    async def test_login_is_case_insensitive(self):
+        payload, _ = await self.register_user()
+        for variant in (payload["email"].upper(), f"  {payload['email'].title()} "):
+            with self.subTest(variant=variant):
+                response = await self.login_user({**payload, "email": variant})
+                self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_legacy_mixed_case_row_can_log_in_and_blocks_case_twins(self):
+        payload, created = await self.register_user()
+        legacy = "Legacy." + payload["email"].replace("registration", "Registration")
+        await self.connection.execute(
+            update(User).where(User.id == created["id"]).values(email=legacy))
+        response = await self.login_user({**payload, "email": legacy.lower()})
+        self.assertEqual(response.status_code, 200, response.text)
+        response = await self.client.post(
+            "/auth/register", json={**self.payload("passenger"), "email": legacy.upper()})
+        self.assertEqual(response.status_code, 409)
+
+    async def test_legacy_case_twins_before_unique_index_never_return_500(self):
+        # Pre-f6b2 data may contain case twins; code is deployed before the migration.
+        await self.connection.execute(text("DROP INDEX uq_users_email_lower"))
+        first, created_a = await self.register_user()
+        second, created_b = await self.register_user()
+        base = first["email"]
+        await self.connection.execute(
+            update(User).where(User.id == created_b["id"]).values(email=base.upper()))
+        # Exact stored match logs in the right account.
+        response = await self.login_user({**first, "email": base})
+        self.assertEqual(response.status_code, 200, response.text)
+        # Ambiguous (no exact match among twins) fails as a generic 401, not 500.
+        await self.connection.execute(
+            update(User).where(User.id == created_a["id"]).values(email=base.title()))
+        response = await self.login_user({**first, "email": base})
+        self.assertEqual(response.status_code, 401, response.text)
+        self.assertEqual(response.json(), {"detail": "Invalid email or password"})
+        # Registration with a third case variant is a generic 409, not 500.
+        response = await self.client.post(
+            "/auth/register", json={**self.payload("passenger"), "email": base})
+        self.assertEqual(response.status_code, 409, response.text)
+
+    async def test_non_ascii_case_folding_matches_postgresql(self):
+        # Python's full case mapping of U+0130 differs from PostgreSQL lower();
+        # identity must follow PostgreSQL for both legacy and new rows.
+        payload, created = await self.register_user()
+        domain = payload["email"].split("@", 1)[1]
+        legacy = f"\u0130stanbul.Stra\u1e9ee@{domain}"
+        await self.connection.execute(
+            update(User).where(User.id == created["id"]).values(email=legacy))
+        for variant in (legacy, f"  {legacy} ", legacy.upper()):
+            with self.subTest(login=variant):
+                response = await self.login_user({**payload, "email": variant})
+                self.assertEqual(response.status_code, 200, response.text)
+        for variant in (legacy, legacy.upper(), f"\u0130STANBUL.STRASSE@{domain}".replace("SS", "\u1e9e")):
+            with self.subTest(register=variant):
+                response = await self.client.post(
+                    "/auth/register", json={**self.payload("passenger"), "email": variant})
+                self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(await self.connection.scalar(select(func.count()).select_from(User)), 1)
+
+    async def test_registration_preserves_non_ascii_letters_and_folds_ascii(self):
+        payload = {**self.payload("passenger")}
+        local, domain = payload["email"].split("@", 1)
+        payload["email"] = f" \u0130Z.{local.upper()}@{domain.upper()} "
+        response = await self.client.post("/auth/register", json=payload)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["email"], f"\u0130z.{local.lower()}@{domain.lower()}")
+        response = await self.login_user({**payload, "email": f"\u0130Z.{local}@{domain}"})
+        self.assertEqual(response.status_code, 200, response.text)
+
     async def test_database_probe_failure_returns_generic_503(self):
         with patch("main.engine") as engine:
             engine.connect.side_effect = RuntimeError("private diagnostic must not escape")
@@ -185,7 +282,7 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def token_claims(self):
         _, user = await self.register_user()
         token = auth.create_access_token(user["id"], user["role"])
-        return jwt.get_unverified_claims(token)
+        return jwt.decode(token, options={"verify_signature": False})
 
     async def test_registration_stores_bcrypt_hash_not_plaintext(self):
         payload, _ = await self.register_user()
@@ -348,7 +445,7 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         response = await self.login_user(payload)
         self.assertEqual(response.status_code, 200)
         token = response.json()["access_token"]
-        claims = jwt.get_unverified_claims(token)
+        claims = jwt.decode(token, options={"verify_signature": False})
         self.assertEqual(claims["role"], "admin")
         for candidate in (token, self.sign({key: value for key, value in claims.items() if key != "iat"})):
             me = await self.client.get("/me", headers={"Authorization": f"Bearer {candidate}"})

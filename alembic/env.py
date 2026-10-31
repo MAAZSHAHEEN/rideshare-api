@@ -51,7 +51,14 @@ def run_migrations_offline() -> None:
 
 
 def configure_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # One transaction per revision: each revision and its version stamp commit
+    # together. Required by revisions that use autocommit_block() (CREATE INDEX
+    # CONCURRENTLY): otherwise a later revision's failure rolls back the earlier
+    # stamps while the concurrently built indexes remain, and a retry fails.
+    context.configure(
+        connection=connection, target_metadata=target_metadata,
+        transaction_per_migration=True,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
