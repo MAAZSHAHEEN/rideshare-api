@@ -313,7 +313,7 @@ def check_tokens():
     legacy_db(db)
     psql(db, "UPDATE users SET email = 'twin.case.b@example.test' WHERE id = 4")
     alembic(db, "upgrade", "head")
-    env = {**alembic_env(db), "SECRET_KEY": "m3-disposable-signing-key", "ALGORITHM": "HS256",
+    env = {**alembic_env(db), "SECRET_KEY": "m3-disposable-signing-key-local-only-0123456789abcdef", "ALGORITHM": "HS256",
            "AUTH_RATE_LIMIT_ENABLED": "false", "M3_IDS": json.dumps({"p": 2, "a": 5})}
     proc = subprocess.run([PYTHON, "-c", TOKEN_PROBE], cwd=ROOT, env=env, capture_output=True, text=True)
     if proc.returncode:
@@ -414,14 +414,18 @@ def check_downgrade():
         psql(db, "UPDATE users SET email = 'twin.case.b@example.test' WHERE id = 4")
         alembic(db, "upgrade", "head")
         psql(db, "UPDATE bookings SET status = 'expired' WHERE id = 7")  # a swept legacy request
-        before = scalar(db, LEGACY_FINGERPRINT.replace("status::text", "replace(status::text, 'expired', 'cancelled')"))
+        # Compare with 'expired' read as 'cancelled': the c1a7e0b00002 downgrade remaps it.
+        mapped = LEGACY_FINGERPRINT.replace("status::text", "replace(status::text, 'expired', 'cancelled')")
+        before = scalar(db, mapped)
         down = alembic(db, "downgrade", target, check=False)
         stamp = version(db)
         only_a, only_b = dump_diff(schema_dump(db), references[target])
         # The 'expired' enum label cannot be dropped (documented): ignore exactly that difference.
-        only_a = [line for line in only_a if "'expired'" not in line]
+        # (the label is listed after 'cancelled', so that line gains a trailing comma).
+        only_a = [line for line in only_a
+                  if "'expired'" not in line and not re.fullmatch(r"\s*'cancelled',\s*", line)]
         only_b = [line for line in only_b if not re.fullmatch(r"\s*'cancelled'\s*", line)]
-        data_kept = scalar(db, LEGACY_FINGERPRINT) == before
+        data_kept = scalar(db, mapped) == before
         up = alembic(db, "upgrade", "head", check=False)
         up_a, up_b = dump_diff(schema_dump(db), references[HEAD]) if up.returncode == 0 else (["upgrade failed"], [])
         emit("downgrade", f"head -> {target} -> head", down.returncode == 0 and stamp == target
